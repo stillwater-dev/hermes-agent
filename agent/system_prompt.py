@@ -302,7 +302,30 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     if agent._memory_store:
         if agent._memory_enabled:
-            mem_block = agent._memory_store.format_for_system_prompt("memory")
+            # Curated-memory source: prefer HMS per-profile memory *blocks*
+            # (composed + budget-respecting, un-truncated), falling back to the
+            # legacy on-disk MEMORY.md snapshot if HMS is disabled, unreachable,
+            # errors, or returns empty.  Toggle via HERMES_MEMORY_BLOCKS_READ
+            # (default ON).  MEMORY.md remains the authoritative fallback.
+            mem_block = None
+            try:
+                from agent import memory_blocks_client as _mbc
+                if _mbc.blocks_read_enabled():
+                    _prof = None
+                    try:
+                        from hermes_cli.profiles import get_active_profile_name
+                        _prof = get_active_profile_name()
+                    except Exception:
+                        _prof = None
+                    _blocks_text = _mbc.fetch_context(_prof) if _prof else None
+                    if _blocks_text:
+                        separator = "\u2550" * 46
+                        header = "MEMORY (your curated memory blocks)"
+                        mem_block = f"{separator}\n{header}\n{separator}\n{_blocks_text}"
+            except Exception:
+                mem_block = None
+            if not mem_block:
+                mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:
                 volatile_parts.append(mem_block)
         # USER.md is always included when enabled.

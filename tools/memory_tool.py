@@ -121,7 +121,7 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 16000, user_char_limit: int = 3000):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
@@ -294,6 +294,35 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
+    # --- HMS memory-blocks mirror (staged; default OFF) -----------------
+    # When HERMES_MEMORY_BLOCKS_WRITE is enabled, mirror the full current
+    # contents of a target into the matching HMS per-profile block so new
+    # curated memories also land in blocks (relieving MEMORY.md/YAML cap
+    # pressure).  Fail-soft: never raises, never blocks the disk write.
+    # MEMORY.md remains authoritative; this is additive.
+    _BLOCK_LABEL_FOR_TARGET = {"memory": "memory", "user": "user"}
+
+    def _mirror_to_blocks(self, target: str) -> None:
+        try:
+            from agent import memory_blocks_client as _mbc
+            if not _mbc.blocks_write_enabled():
+                return
+            label = self._BLOCK_LABEL_FOR_TARGET.get(target)
+            if not label:
+                return
+            try:
+                from hermes_cli.profiles import get_active_profile_name
+                profile = get_active_profile_name()
+            except Exception:
+                return
+            if not profile or profile in ("default", "custom"):
+                return
+            content = ENTRY_DELIMITER.join(self._entries_for(target))
+            # replace = full-state mirror; correct for add/replace/remove alike.
+            _mbc.replace_block(profile, label, content)
+        except Exception:
+            return
+
     def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
@@ -341,6 +370,7 @@ class MemoryStore:
             entries.append(content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
+            self._mirror_to_blocks(target)
 
         return self._success_response(target, "Entry added.")
 
@@ -401,6 +431,7 @@ class MemoryStore:
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+            self._mirror_to_blocks(target)
 
         return self._success_response(target, "Entry replaced.")
 
@@ -437,6 +468,7 @@ class MemoryStore:
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
+            self._mirror_to_blocks(target)
 
         return self._success_response(target, "Entry removed.")
 
