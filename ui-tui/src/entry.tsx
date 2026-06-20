@@ -34,7 +34,12 @@ if (TERMUX_TUI_MODE) {
 
 const gw = new GatewayClient()
 
-gw.start()
+// Start the gateway transport after the initial React/Ink render has been
+// scheduled. In dashboard attach mode (`HERMES_TUI_GATEWAY_URL`) WebSocket
+// setup/teardown can synchronously buffer lifecycle events; starting before
+// `ink.render()` lets those events re-enter App while hooks are still rendering
+// and trips React's render-phase update guard (#301 in the browser chat tab).
+setImmediate(() => gw.start())
 
 const dumpNotice = (snap: MemorySnapshot, dump: HeapDumpResult | null) =>
   `hermes-tui: ${snap.level} memory (${formatBytes(snap.heapUsed)}) — auto heap dump → ${dump?.heapPath ?? '(failed)'}\n`

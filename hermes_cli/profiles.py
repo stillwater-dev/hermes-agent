@@ -59,12 +59,13 @@ _CLONE_CONFIG_FILES = [
 ]
 
 # Subdirectory files copied during --clone (path relative to profile root).
-# Memory files are part of the agent's curated identity — just as important
-# as SOUL.md for continuity when cloning a profile.
-_CLONE_SUBDIR_FILES = [
-    "memories/MEMORY.md",
-    "memories/USER.md",
-]
+# remediation 2026-06-14: identity memory (memories/MEMORY.md, memories/USER.md)
+# is the agent's persona identity and MUST NOT be cloned — copying it verbatim
+# bled a source persona's identity into cloned profiles (e.g. a journalist
+# identity ending up in a librarian profile). A cloned profile now starts with
+# NO inherited identity memory. Leave this list in place (empty) so the clone
+# loop below keeps working for any future non-identity subdir files.
+_CLONE_SUBDIR_FILES: list[str] = []
 
 # Runtime files stripped after --clone-all (shouldn't carry over).
 # Kept as a post-copy step rather than in the ignore filter because they
@@ -740,6 +741,20 @@ def create_profile(
         # Strip runtime files
         for stale in _CLONE_ALL_STRIP:
             (profile_dir / stale).unlink(missing_ok=True)
+        # remediation 2026-06-14: --clone-all copytree carries the whole source
+        # profile, which includes the source persona's identity memory. Identity
+        # MUST NOT bleed across profiles (see _CLONE_SUBDIR_FILES note above), so
+        # blank out the identity files in the freshly-created clone destination.
+        # We TRUNCATE rather than unlink: the destination is a brand-new clone
+        # (not pre-existing data), and an empty-but-present file keeps the agent's
+        # normal memory-file handling intact while starting identity from scratch.
+        for identity_rel in ("memories/MEMORY.md", "memories/USER.md"):
+            ident_path = profile_dir / identity_rel
+            if ident_path.exists():
+                try:
+                    ident_path.write_text("", encoding="utf-8")
+                except OSError:
+                    pass
     else:
         # Bootstrap directory structure
         profile_dir.mkdir(parents=True, exist_ok=True)

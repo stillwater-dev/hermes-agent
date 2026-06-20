@@ -1259,6 +1259,16 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 30,
             "extra_body": {},
+            "agentic": False,       # legacy smart mode uses a direct aux call unless opted into a no-tools Hermes agent
+        },
+        "approval_reviewer": {
+            "provider": "auto",
+            "model": "",           # reviewer mode: independent no-tools Hermes agent by default
+            "base_url": "",
+            "api_key": "",
+            "timeout": 45,
+            "extra_body": {},
+            "agentic": True,        # instantiate an isolated AIAgent; no fuzzy/direct-LLM approval path
         },
         "mcp": {
             "provider": "auto",
@@ -1639,7 +1649,7 @@ DEFAULT_CONFIG = {
     "memory": {
         "memory_enabled": True,
         "user_profile_enabled": True,
-        "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
+        "memory_char_limit": 16000,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
@@ -1896,9 +1906,13 @@ DEFAULT_CONFIG = {
     },
 
     # Approval mode for dangerous commands:
-    #   manual — always prompt the user (default)
-    #   smart  — use auxiliary LLM to auto-approve low-risk commands, prompt for high-risk
-    #   off    — skip all approval prompts (equivalent to --yolo)
+    #   manual   — always prompt the user (default)
+    #   smart    — use auxiliary.approval to auto-approve low-risk commands,
+    #              auto-deny clearly dangerous ones, and prompt on uncertainty
+    #   reviewer — two-agent mode: use independent auxiliary.approval_reviewer
+    #              as an isolated no-tools Hermes AIAgent to approve / deny /
+    #              escalate before prompting the user
+    #   off      — skip all approval prompts (equivalent to --yolo)
     #
     # cron_mode — what to do when a cron job hits a dangerous command:
     #   deny    — block the command and let the agent find another way (default, safe)
