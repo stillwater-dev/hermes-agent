@@ -266,6 +266,43 @@ def test_guard_smart_mode(gw_session, monkeypatch):
     assert res["approved"] is True
 
 
+def test_guard_reviewer_mode(gw_session, monkeypatch):
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "reviewer")
+
+    monkeypatch.setattr(A, "_two_agent_approve", lambda c, d: "approve")
+    res = A.check_execute_code_guard("import os", "local")
+    assert res["approved"] is True and res.get("reviewer_approved") is True
+
+    monkeypatch.setattr(A, "_two_agent_approve", lambda c, d: "deny")
+    res = A.check_execute_code_guard("import os", "local")
+    assert res["approved"] is False and res.get("reviewer_denied") is True
+
+    # escalate → falls through to manual gateway approval
+    monkeypatch.setattr(A, "_two_agent_approve", lambda c, d: "escalate")
+    _register_resolver(gw_session, "once")
+    res = A.check_execute_code_guard("import os", "local")
+    assert res["approved"] is True
+
+
+def test_two_agent_approval_uses_independent_agentic_reviewer(monkeypatch):
+    seen = {}
+
+    def fake_agentic(command, description, *, task):
+        seen.update({"command": command, "description": description, "task": task})
+        return "approve", {
+            "verdict": "approve",
+            "rationale": "safe bounded command",
+            "safe_factors": ["read-only"],
+            "risk_factors": [],
+        }
+
+    monkeypatch.setattr(A, "_agentic_reviewer_approve", fake_agentic)
+
+    assert A._two_agent_approve("python -c 'print(1)'", "script execution") == "approve"
+    assert seen["task"] == "approval_reviewer"
+    assert "python -c" in seen["command"]
+
+
 def test_guard_session_yolo_bypasses(gw_session):
     A.enable_session_yolo(gw_session)
     try:

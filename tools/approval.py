@@ -9,6 +9,8 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import hashlib
+import json
 import logging
 import os
 import re
@@ -16,6 +18,8 @@ import sys
 import threading
 import time
 import unicodedata
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from hermes_cli.config import cfg_get
 
@@ -46,6 +50,153 @@ _approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+def _approval_audit_path() -> Path:
+    """Return the profile-local durable approval audit log path."""
+    try:
+        from hermes_constants import get_hermes_home
+        home = Path(get_hermes_home())
+    except Exception:
+        home = Path(os.path.expanduser("~/.hermes"))
+    return home / "logs" / "approval_events.jsonl"
+
+
+def _approval_command_record(command: str) -> dict:
+    """Privacy-safer command identity: hash + short preview, not full history."""
+    command = command or ""
+    preview = " ".join(command.split())[:240]
+    return {
+        "command_sha256": hashlib.sha256(command.encode("utf-8", "replace")).hexdigest(),
+        "command_preview": preview,
+    }
+
+
+def _approval_category(description: str = "", pattern_key: str = "") -> str:
+    """Coarse action category for approval dashboards."""
+    text = f"{pattern_key} {description}".lower()
+    if "tirith" in text or "security scan" in text:
+        return "security_scan"
+    if any(s in text for s in ("rm", "delete", "destructive", "filesystem", "file deletion")):
+        return "filesystem_destructive"
+    if any(s in text for s in ("sudo", "privilege", "root")):
+        return "privilege"
+    if any(s in text for s in ("curl", "wget", "network", "http", "url")):
+        return "network"
+    if "git" in text:
+        return "git"
+    if any(s in text for s in ("execute_code", "python", "script", "interpreter")):
+        return "code_execution"
+    if any(s in text for s in ("process", "service", "systemctl", "docker")):
+        return "process_service"
+    return "other"
+
+
+def _semantic_approval_context(command: str, description: str = "") -> str:
+    """Return reviewer-facing semantic observations about flagged commands.
+
+    This is not an approval bypass. It gives the reviewer model concrete facts
+    that conservative scanners cannot infer from a broad pattern like
+    ``curl | python3``. The reviewer still decides APPROVE/DENY/ESCALATE.
+    """
+    command = command or ""
+    description = description or ""
+    compact = " ".join(command.split())
+    lower = compact.lower()
+    observations = []
+
+    pipe_to_python = bool(re.search(r"\|\s*(?:python|python3)\b", lower))
+    uses_python_c = bool(re.search(r"\|\s*(?:python|python3)\b[^|;&]*\s-c\b", lower))
+    uses_json_tool = bool(re.search(r"\|\s*(?:python|python3)\b[^|;&]*\s-m\s+json\.tool\b", lower))
+    fetches_url = bool(re.search(r"\b(?:curl|wget)\b", lower) and re.search(r"https?://", lower))
+    parses_stdin_json = (
+        "json.load(sys.stdin)" in lower
+        or "json.loads(sys.stdin.read())" in lower
+        or uses_json_tool
+    )
+    prints_only = "print(" in lower or uses_json_tool
+    remote_code_markers = [
+        "eval(", "exec(", "compile(", "__import__(", "subprocess", "os.system",
+        "popen(", "run(", "call(", "bash", " sh ", "chmod +x", "sudo ",
+        "systemctl", "docker ", "kubectl", "scp ", "rsync ", " nc ", "netcat",
+    ]
+    write_markers = [
+        " > ", " >> ", "tee ", "open(", ".write(", "pathlib", "unlink(",
+        "remove(", "rmdir(", "rm -", "mv ", "cp ",
+    ]
+    has_remote_code_marker = any(marker in lower for marker in remote_code_markers)
+    has_write_marker = any(marker in lower for marker in write_markers)
+
+    if pipe_to_python:
+        observations.append("Scanner matched a pipe into Python/interpreter; inspect whether remote bytes are code or data.")
+    if fetches_url:
+        urls = re.findall(r"https?://[^\s'\"|;]+", compact)
+        if urls:
+            observations.append("Network fetch target(s): " + ", ".join(urls[:3]))
+    if pipe_to_python and uses_python_c and parses_stdin_json:
+        observations.append("The Python program is supplied locally via -c and parses stdin as JSON data with json.load/json.loads.")
+    if pipe_to_python and uses_json_tool:
+        observations.append("The Python module is the standard-library json.tool pretty-printer; stdin is parsed as JSON data and printed, not executed as Python code.")
+    if pipe_to_python and parses_stdin_json and prints_only and not has_remote_code_marker and not has_write_marker:
+        observations.append(
+            "Semantic observation: this appears to be a data-processing pipe. Remote response appears to be parsed as JSON/text data and printed/extracted only; no eval/exec/import of remote code, subprocess/service mutation, or file writes detected. Treat this as evidence for the reviewer to weigh, not as an automatic verdict."
+        )
+    elif pipe_to_python and (has_remote_code_marker or has_write_marker):
+        observations.append(
+            "Semantic risk hint: side-effect/code-execution markers are present; do not auto-approve solely because the command uses Python."
+        )
+    if "curl |" in lower or "pipe to interpreter" in description.lower():
+        observations.append(
+            "Differentiate `curl remote-script | interpreter` from `curl API-data | local parser`: the former executes remote code; the latter may be a read-only data extraction."
+        )
+
+    if not observations:
+        observations.append("No additional semantic safe-case detected beyond the scanner finding.")
+    return "\n".join(f"- {item}" for item in observations)
+
+
+def _record_approval_event(event: str, *, command: str = "", description: str = "",
+                           pattern_key: str = "", pattern_keys: list | None = None,
+                           session_key: str = "", surface: str = "", mode: str = "",
+                           reviewer_task: str = "", reviewer_verdict: str = "",
+                           choice: str = "", approved: bool | None = None,
+                           reason: str = "", reviewer_rationale: str = "",
+                           reviewer_safe_factors: list | None = None,
+                           reviewer_risk_factors: list | None = None) -> None:
+    """Append one durable approval event as JSONL.
+
+    This is best-effort observability. Approval safety must never depend on the
+    metrics file being writable, so all errors are swallowed after debug logging.
+    """
+    try:
+        path = _approval_audit_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "mode": mode or _get_approval_mode(),
+            "surface": surface,
+            "session_key": session_key or get_current_session_key(),
+            "turn_id": _approval_turn_id.get(),
+            "tool_call_id": _approval_tool_call_id.get(),
+            "pattern_key": pattern_key,
+            "pattern_keys": list(pattern_keys or ([] if not pattern_key else [pattern_key])),
+            "description": description,
+            "category": _approval_category(description, pattern_key),
+            "reviewer_task": reviewer_task,
+            "reviewer_verdict": reviewer_verdict,
+            "reviewer_rationale": reviewer_rationale,
+            "reviewer_safe_factors": list(reviewer_safe_factors or []),
+            "reviewer_risk_factors": list(reviewer_risk_factors or []),
+            "choice": choice,
+            "approved": approved,
+            "reason": reason,
+        }
+        payload.update(_approval_command_record(command))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:
+        logger.debug("Failed to record approval event %s: %s", event, exc)
+
+
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     """Invoke a plugin lifecycle hook for the approval system.
 
@@ -56,6 +207,15 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     Only fires for the two approval-specific hooks in VALID_HOOKS:
     pre_approval_request, post_approval_response.
     """
+    if hook_name == "pre_approval_request":
+        _record_approval_event("manual_request", **kwargs, approved=None)
+    elif hook_name == "post_approval_response":
+        choice = str(kwargs.get("choice") or "")
+        _record_approval_event(
+            "manual_response",
+            **kwargs,
+            approved=choice in {"once", "session", "always"},
+        )
     try:
         from hermes_cli.plugins import invoke_hook
     except Exception:
@@ -936,51 +1096,239 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
-def _smart_approve(command: str, description: str) -> str:
-    """Use the auxiliary LLM to assess risk and decide approval.
+def _parse_reviewer_response(text: str) -> dict:
+    """Parse reviewer output.
 
-    Returns 'approve' if the LLM determines the command is safe,
-    'deny' if genuinely dangerous, or 'escalate' if uncertain.
+    Preferred format is JSON with verdict/rationale/factors. Legacy one-word
+    APPROVE/DENY/ESCALATE is still accepted for backward compatibility.
+    """
+    raw = (text or "").strip()
+    upper = raw.upper()
+    if upper in {"APPROVE", "DENY", "ESCALATE"}:
+        return {
+            "verdict": upper.lower(),
+            "rationale": "legacy one-word reviewer response",
+            "safe_factors": [],
+            "risk_factors": [],
+        }
+    leading_verdict = re.match(r"^\s*(APPROVE|DENY|ESCALATE)\b\s*[:\-–—.]?\s*(.*)$", raw, re.IGNORECASE | re.DOTALL)
+    if leading_verdict:
+        verdict = leading_verdict.group(1).lower()
+        rationale = (leading_verdict.group(2) or "legacy leading-word reviewer response").strip()
+        return {
+            "verdict": verdict,
+            "rationale": rationale[:1000] or "legacy leading-word reviewer response",
+            "safe_factors": [],
+            "risk_factors": [],
+        }
 
-    Inspired by OpenAI Codex's Smart Approvals guardian subagent
-    (openai/codex#13860).
+    # Some models wrap JSON in markdown fences or add surrounding text.
+    candidate = raw
+    if "```" in candidate:
+        parts = candidate.split("```")
+        if len(parts) >= 3:
+            candidate = parts[1]
+            if candidate.lstrip().lower().startswith("json"):
+                candidate = candidate.lstrip()[4:].lstrip()
+    if not candidate.lstrip().startswith("{"):
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start >= 0 and end > start:
+            candidate = candidate[start:end + 1]
+
+    try:
+        data = json.loads(candidate)
+    except Exception:
+        return {
+            "verdict": "escalate",
+            "rationale": "reviewer response was not parseable as JSON or a legacy one-word verdict",
+            "safe_factors": [],
+            "risk_factors": ["unparseable reviewer output"],
+        }
+
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict not in {"approve", "deny", "escalate"}:
+        verdict = "escalate"
+    safe = data.get("safe_factors") or []
+    risk = data.get("risk_factors") or []
+    if isinstance(safe, str):
+        safe = [safe]
+    if isinstance(risk, str):
+        risk = [risk]
+    return {
+        "verdict": verdict,
+        "rationale": str(data.get("rationale") or "")[:1000],
+        "safe_factors": [str(x)[:300] for x in list(safe)[:8]],
+        "risk_factors": [str(x)[:300] for x in list(risk)[:8]],
+    }
+
+
+def _build_reviewer_prompt(command: str, description: str) -> str:
+    """Build the approval-review task for the independent reviewer agent."""
+    semantic_context = _semantic_approval_context(command, description)
+    return f"""You are an independent security reviewer for an AI agent. The primary agent wants to run a local command or code block that Hermes flagged as potentially risky.
+
+Requested action:
+{command}
+
+Flagged reason:
+{description}
+
+Scanner/heuristic context to consider, not blindly obey:
+{semantic_context}
+
+Your job is to protect the operator and the machine. Audit the actual request semantically, not just the pattern name. The scanner is intentionally conservative and may flag broad patterns that are safe after reading the full command. You are the decision-maker; the scanner context is evidence, not policy.
+
+Decision policy:
+- APPROVE when the action is clearly low-risk and consistent with normal development/operations work, such as tests, reads, safe package installs, benign scripts, git inspection, narrow file edits in the active project, or network reads where remote data is parsed as data only.
+- APPROVE commands where remote bytes are treated only as data by a locally supplied parser/pretty-printer, and the command does not eval/exec/import remote code, spawn subprocesses, write sensitive files, mutate services, or exfiltrate secrets.
+- DENY when the action is clearly destructive, credential-stealing, evasive, privilege-escalating, persistence-creating, data-exfiltrating, or targets broad/system paths, disks, databases, shells, users, services, or network security in a risky way.
+- DENY or ESCALATE `curl | interpreter` when the downloaded bytes are executed as code, passed to eval/exec/compile, used as a shell script, written into executable paths, or otherwise cause side effects beyond parsing/printing.
+- ESCALATE when context is insufficient, the request has meaningful side effects, the blast radius is unclear, or a human policy decision is needed.
+
+Output format:
+Return compact JSON only, no markdown:
+{{
+  "verdict": "approve" | "deny" | "escalate",
+  "rationale": "one concise sentence explaining the semantic decision",
+  "safe_factors": ["specific observed safety property"],
+  "risk_factors": ["specific remaining risk, or empty if none"]
+}}"""
+
+
+def _get_auxiliary_task_config_for_approval(task: str) -> dict:
+    try:
+        from agent.auxiliary_client import _get_auxiliary_task_config
+        cfg = _get_auxiliary_task_config(task)
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def _reviewer_agentic_enabled(task: str) -> bool:
+    cfg = _get_auxiliary_task_config_for_approval(task)
+    raw = cfg.get("agentic")
+    if raw is None:
+        return task == "approval_reviewer"
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "agent", "agentic"}
+
+
+def _agentic_reviewer_approve(command: str, description: str, *, task: str = "approval_reviewer") -> tuple[str, dict]:
+    """Run a real, isolated Hermes AIAgent as the approval reviewer.
+
+    The reviewer is a Hermes agent loop, not a direct one-shot auxiliary call.
+    It receives no tools (`enabled_toolsets=[]`) and no memory/context files, so
+    it can reason over the command but cannot execute anything or mutate state.
+    """
+    from run_agent import AIAgent
+
+    cfg = _get_auxiliary_task_config_for_approval(task)
+    provider = str(cfg.get("provider") or "").strip()
+    model = str(cfg.get("model") or "").strip()
+    base_url = str(cfg.get("base_url") or "").strip()
+    api_key = str(cfg.get("api_key") or "").strip()
+    api_mode = str(cfg.get("api_mode") or "").strip()
+    if provider.lower() == "auto":
+        provider = ""
+
+    prompt = _build_reviewer_prompt(command, description)
+    system_message = (
+        "You are Hermes Approval Reviewer, a separate no-tools Hermes agent. "
+        "You do not execute commands. You only audit the proposed command and "
+        "return the required JSON verdict. Be semantic and agentic: reason about "
+        "what the command actually does, not just scanner labels."
+    )
+    agent = AIAgent(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+        max_iterations=4,
+        enabled_toolsets=[],
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        platform="approval_reviewer",
+        max_tokens=2048,
+    )
+    result = agent.run_conversation(prompt, system_message=system_message)
+    raw_answer = ""
+    if isinstance(result, dict):
+        raw_answer = str(result.get("final_response") or "")
+    else:
+        raw_answer = str(result or "")
+    parsed = _parse_reviewer_response(raw_answer)
+    return parsed["verdict"], parsed
+
+
+def _auxiliary_reviewer_approve(command: str, description: str, *, task: str = "approval") -> tuple[str, dict]:
+    """Legacy one-shot auxiliary reviewer path."""
+    from agent.auxiliary_client import call_llm
+
+    response = call_llm(
+        task=task,
+        messages=[{"role": "user", "content": _build_reviewer_prompt(command, description)}],
+        temperature=0,
+        max_tokens=256,
+    )
+    raw_answer = response.choices[0].message.content or ""
+    parsed = _parse_reviewer_response(raw_answer)
+    return parsed["verdict"], parsed
+
+
+def _reviewer_approve(command: str, description: str, *, task: str = "approval") -> str:
+    """Use an independent reviewer to assess risk and decide approval.
+
+    `approval_reviewer` defaults to a real no-tools Hermes agent. Legacy
+    `approval` smart mode keeps the direct auxiliary call unless configured with
+    `auxiliary.approval.agentic: true`.
     """
     try:
-        from agent.auxiliary_client import call_llm
-
-        prompt = f"""You are a security reviewer for an AI coding agent. A terminal command was flagged by pattern matching as potentially dangerous.
-
-Command: {command}
-Flagged reason: {description}
-
-Assess the ACTUAL risk of this command. Many flagged commands are false positives — for example, `python -c "print('hello')"` is flagged as "script execution via -c flag" but is completely harmless.
-
-Rules:
-- APPROVE if the command is clearly safe (benign script execution, safe file operations, development tools, package installs, git operations, etc.)
-- DENY if the command could genuinely damage the system (recursive delete of important paths, overwriting system files, fork bombs, wiping disks, dropping databases, etc.)
-- ESCALATE if you're uncertain
-
-Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
-
-        response = call_llm(
-            task="approval",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=16,
-        )
-
-        answer = (response.choices[0].message.content or "").strip().upper()
-
-        if answer == "APPROVE":
-            return "approve"
-        elif answer == "DENY":
-            return "deny"
+        if _reviewer_agentic_enabled(task):
+            verdict, parsed = _agentic_reviewer_approve(command, description, task=task)
+            reason = "agentic_reviewer"
         else:
-            return "escalate"
+            verdict, parsed = _auxiliary_reviewer_approve(command, description, task=task)
+            reason = "auxiliary_reviewer"
+        _record_approval_event(
+            "reviewer_verdict",
+            command=command,
+            description=description,
+            reviewer_task=task,
+            reviewer_verdict=verdict,
+            reviewer_rationale=parsed.get("rationale", ""),
+            reviewer_safe_factors=parsed.get("safe_factors") or [],
+            reviewer_risk_factors=parsed.get("risk_factors") or [],
+            approved=True if verdict == "approve" else (False if verdict == "deny" else None),
+            reason=reason,
+        )
+        return verdict
 
     except Exception as e:
-        logger.debug("Smart approvals: LLM call failed (%s), escalating", e)
+        logger.debug("Reviewer approval (%s): reviewer failed (%s), escalating", task, e)
+        _record_approval_event(
+            "reviewer_verdict",
+            command=command,
+            description=description,
+            reviewer_task=task,
+            reviewer_verdict="escalate",
+            approved=None,
+            reason=f"reviewer_error:{type(e).__name__}",
+        )
         return "escalate"
+
+
+def _smart_approve(command: str, description: str) -> str:
+    """Legacy smart approval using the ``auxiliary.approval`` task."""
+    return _reviewer_approve(command, description, task="approval")
+
+
+def _two_agent_approve(command: str, description: str) -> str:
+    """Two-agent approval using the independent ``approval_reviewer`` task."""
+    return _reviewer_approve(command, description, task="approval_reviewer")
 
 
 def check_dangerous_command(command: str, env_type: str,
@@ -1252,19 +1600,27 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
-    # --yolo or approvals.mode=off: bypass all approval prompts.
-    # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
+    # Autopilot is intentionally autonomous, but never blind. It uses reviewer
+    # mode for routine bounded work and fails closed when the reviewer cannot
+    # decide. Do not let yolo/off short-circuit this path.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    is_autopilot = env_var_enabled("HERMES_AUTOPILOT_SESSION")
+    if is_autopilot and approval_mode in {"manual", "off", "ask", "yolo", ""}:
+        approval_mode = "reviewer"
+
+    # --yolo or approvals.mode=off: bypass all approval prompts outside
+    # Autopilot. Gateway /yolo is session-scoped; CLI --yolo is process-scoped.
+    if not is_autopilot and (_YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off"):
         return {"approved": True, "message": None}
 
     is_cli = env_var_enabled("HERMES_INTERACTIVE")
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
-    # flows, we do not block on approvals and we skip external guard work.
-    if not is_cli and not is_gateway and not is_ask:
+    # Outside CLI/gateway/ask/autopilot flows, fail closed for dangerous
+    # commands. This removes the old hidden headless auto-approval bypass while
+    # still allowing benign non-interactive commands.
+    if not is_cli and not is_gateway and not is_ask and not is_autopilot:
         # Cron sessions: respect cron_mode config
         if env_var_enabled("HERMES_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
@@ -1281,6 +1637,24 @@ def check_all_command_guards(command: str, env_type: str,
                             "approvals.cron_mode: approve in config.yaml."
                         ),
                     }
+        is_dangerous, _pk, description = detect_dangerous_command(command)
+        if is_dangerous:
+            _record_approval_event(
+                "headless_block",
+                command=command,
+                description=description,
+                surface="headless",
+                mode=approval_mode,
+                approved=False,
+                reason="noninteractive_no_approval_surface",
+            )
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED: Command flagged as dangerous ({description}) "
+                    "in a non-interactive context without Autopilot or approval surface."
+                ),
+            }
         return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
@@ -1328,25 +1702,50 @@ def check_all_command_guards(command: str, env_type: str,
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
-    if approval_mode == "smart":
+    if approval_mode in {"smart", "reviewer"}:
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
-        verdict = _smart_approve(command, combined_desc_for_llm)
+        reviewer = _two_agent_approve if approval_mode == "reviewer" else _smart_approve
+        verdict = reviewer(command, combined_desc_for_llm)
+        warning_keys = [key for key, _, _ in warnings]
+        _record_approval_event(
+            "auto_decision",
+            command=command,
+            description=combined_desc_for_llm,
+            pattern_key=warning_keys[0] if warning_keys else "",
+            pattern_keys=warning_keys,
+            session_key=session_key,
+            surface="gateway" if is_gateway else ("cli" if is_cli else "ask"),
+            mode=approval_mode,
+            reviewer_task="approval_reviewer" if approval_mode == "reviewer" else "approval",
+            reviewer_verdict=verdict,
+            approved=True if verdict == "approve" else (False if verdict == "deny" else None),
+        )
         if verdict == "approve":
             # Auto-approve and grant session-level approval for these patterns
-            for key, _, _ in warnings:
-                approve_session(session_key, key)
-            logger.debug("Smart approval: auto-approved '%s' (%s)",
-                         command[:60], combined_desc_for_llm)
+            if not is_autopilot:
+                for key, _, _ in warnings:
+                    approve_session(session_key, key)
+            logger.debug("%s approval: auto-approved '%s' (%s)",
+                         approval_mode.capitalize(), command[:60], combined_desc_for_llm)
             return {"approved": True, "message": None,
-                    "smart_approved": True,
+                    f"{approval_mode}_approved": True,
+                    "autopilot_approved": bool(is_autopilot),
                     "description": combined_desc_for_llm}
         elif verdict == "deny":
-            combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
             return {
                 "approved": False,
-                "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
+                "message": f"BLOCKED by {approval_mode} approval: {combined_desc_for_llm}. "
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
-                "smart_denied": True,
+                f"{approval_mode}_denied": True,
+            }
+        if is_autopilot:
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED by autopilot: reviewer escalated {combined_desc_for_llm}. "
+                    "Queue a human-required attention item instead of retrying."
+                ),
+                "reviewer_escalated": True,
             }
         # verdict == "escalate" → fall through to manual prompt
 
@@ -1543,9 +1942,15 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
         return {"approved": True, "message": None}
 
-    # --yolo or approvals.mode=off: bypass (session- or process-scoped).
+    # Autopilot is autonomous but not yolo. It uses reviewer mode for whole
+    # execute_code scripts and fails closed on escalation.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    is_autopilot = env_var_enabled("HERMES_AUTOPILOT_SESSION")
+    if is_autopilot and approval_mode in {"manual", "off", "ask", "yolo", ""}:
+        approval_mode = "reviewer"
+
+    # --yolo or approvals.mode=off: bypass outside Autopilot only.
+    if not is_autopilot and (_YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off"):
         return {"approved": True, "message": None}
 
     is_gateway = _is_gateway_approval_context()
@@ -1576,7 +1981,7 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     #     (context now propagates into the RPC thread, #33057); a whole-script
     #     prompt would fire on every execute_code call.
     #   * Local non-interactive non-gateway: documented limitation above.
-    if not is_gateway and not is_ask:
+    if not is_gateway and not is_ask and not is_autopilot:
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
@@ -1593,23 +1998,51 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     # Smart mode: ask the aux LLM about the whole script. An APPROVE here only
     # suppresses the redundant whole-script prompt; the per-call terminal()
     # guards (restored by context propagation) still run independently.
-    if approval_mode == "smart":
-        verdict = _smart_approve(command, description)
+    if approval_mode in {"smart", "reviewer"}:
+        reviewer = _two_agent_approve if approval_mode == "reviewer" else _smart_approve
+        verdict = reviewer(command, description)
+        _record_approval_event(
+            "auto_decision",
+            command=command,
+            description=description,
+            pattern_key=pattern_key,
+            pattern_keys=[pattern_key],
+            session_key=session_key,
+            surface="gateway" if is_gateway else "ask",
+            mode=approval_mode,
+            reviewer_task="approval_reviewer" if approval_mode == "reviewer" else "approval",
+            reviewer_verdict=verdict,
+            approved=True if verdict == "approve" else (False if verdict == "deny" else None),
+        )
         if verdict == "approve":
-            logger.debug("Smart approval: auto-approved execute_code for session %s",
-                         session_key)
+            logger.debug("%s approval: auto-approved execute_code for session %s",
+                         approval_mode.capitalize(), session_key)
             return {"approved": True, "message": None,
-                    "smart_approved": True, "description": description}
+                    f"{approval_mode}_approved": True,
+                    "autopilot_approved": bool(is_autopilot),
+                    "description": description}
         if verdict == "deny":
             return {
                 "approved": False,
-                "message": ("BLOCKED by smart approval: execute_code script "
+                "message": (f"BLOCKED by {approval_mode} approval: execute_code script "
                             "execution was assessed as genuinely dangerous. "
                             "Do NOT retry."),
-                "smart_denied": True,
+                f"{approval_mode}_denied": True,
                 "pattern_key": pattern_key,
                 "description": description,
                 "outcome": "denied",
+                "user_consent": False,
+            }
+        if is_autopilot:
+            return {
+                "approved": False,
+                "message": (
+                    "BLOCKED by autopilot: reviewer escalated execute_code. "
+                    "Queue a human-required attention item instead of retrying."
+                ),
+                "pattern_key": pattern_key,
+                "description": description,
+                "outcome": "escalated",
                 "user_consent": False,
             }
         # verdict == "escalate" → fall through to manual approval
