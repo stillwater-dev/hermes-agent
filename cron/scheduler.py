@@ -843,19 +843,58 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 )
 
         if not delivered:
-            # Standalone path: run the async send in a fresh event loop (safe from any thread)
+            # Standalone path: run the async send in a fresh event loop (safe from any thread).
+            # Guard against interpreter shutdown first — ThreadPoolExecutor.submit raises
+            # RuntimeError("cannot schedule new futures after interpreter shutdown") when the
+            # daemon is exiting, and there is no recovery path from that state.
+            if sys.is_finalizing():
+                msg = f"delivery to {platform_name}:{chat_id} skipped: interpreter shutdown"
+                logger.warning("Job '%s': %s", job["id"], msg)
+                delivery_errors.append(msg)
+                continue
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
             try:
                 result = asyncio.run(coro)
             except RuntimeError:
-                # asyncio.run() checks for a running loop before awaiting the coroutine;
-                # when it raises, the original coro was never started — close it to
-                # prevent "coroutine was never awaited" RuntimeWarning, then retry in a
-                # fresh thread that has no running loop.
-                coro.close()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
-                    result = future.result(timeout=30)
+                # asyncio.run() raises RuntimeError for two distinct reasons, and the
+                # recovery differs for each:
+                #   1. A loop is already running in this thread — the coro was never
+                #      started. close() it and retry inside a fresh thread (no loop).
+                #   2. The RuntimeError came from inside the coro (loop closed, async
+                #      resource rejected new task, interpreter tearing down) — the coro
+                #      may already be started, so close() will raise. The retry path
+                #      may itself hit "cannot schedule new futures after interpreter
+                #      shutdown" via ThreadPoolExecutor.submit. Detect that case and
+                #      bail cleanly instead of bubbling a misleading error.
+                if sys.is_finalizing():
+                    msg = f"delivery to {platform_name}:{chat_id} skipped: interpreter shutdown"
+                    logger.warning("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
+                try:
+                    coro.close()
+                except RuntimeError:
+                    # Coroutine was already started before the inner failure — close()
+                    # rejects already-awaited coroutines. Drop the reference and continue.
+                    pass
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                        result = future.result(timeout=30)
+                except RuntimeError as submit_err:
+                    # pool.submit can raise RuntimeError("cannot schedule new futures
+                    # after interpreter shutdown") even if sys.is_finalizing() above
+                    # returned False — the daemon can enter finalization between the
+                    # two checks. Treat any RuntimeError from the retry path as a
+                    # soft delivery failure rather than aborting the whole tick.
+                    if "interpreter shutdown" in str(submit_err) or "shutdown" in str(submit_err).lower():
+                        msg = f"delivery to {platform_name}:{chat_id} skipped: {submit_err}"
+                        logger.warning("Job '%s': %s", job["id"], msg)
+                    else:
+                        msg = f"delivery to {platform_name}:{chat_id} failed: {submit_err}"
+                        logger.error("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
                 logger.error("Job '%s': %s", job["id"], msg)

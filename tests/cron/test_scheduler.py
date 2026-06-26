@@ -2627,3 +2627,121 @@ class TestSendMediaTimeoutCancelsFuture:
         # 2. Second file still got dispatched — one timeout doesn't abort the batch
         adapter.send_video.assert_called_once()
         assert adapter.send_video.call_args[1]["video_path"] == str(fast.resolve())
+
+
+class TestDeliverResultInterpreterShutdown:
+    """Regression tests for the 'cannot schedule new futures after interpreter
+    shutdown' error in cron delivery. Three distinct race conditions can trigger
+    this; all three must produce a clean delivery_error instead of bubbling.
+
+    See cron/scheduler.py:845-905 for the standalone-fallback path under test.
+    """
+
+    class _CloseableAwaitable:
+        def __init__(self, close_error=None):
+            self.close_error = close_error
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+            if self.close_error:
+                raise self.close_error
+
+    def _make_job(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        return {
+            "id": "shutdown-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }, mock_cfg
+
+    def test_sys_is_finalizing_short_circuits_standalone_path(self):
+        """When sys.is_finalizing() is True at the top of the standalone path,
+        _deliver_result must record a 'skipped: interpreter shutdown' error
+        and never call asyncio.run or ThreadPoolExecutor.submit.
+        """
+        job, mock_cfg = self._make_job()
+        standalone_send = AsyncMock(return_value={"success": True})
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("cron.scheduler.sys.is_finalizing", return_value=True), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send) as platform_send, \
+             patch("asyncio.run") as run_mock:
+            result = _deliver_result(job, "Hello world")
+
+        # Standalone path must short-circuit BEFORE touching asyncio.run
+        run_mock.assert_not_called()
+        # And it must NOT have invoked _send_to_platform (no point — interpreter is dying)
+        platform_send.assert_not_called()
+        # Result must surface as a clean delivery error mentioning shutdown
+        assert result is not None
+        assert "interpreter shutdown" in result
+        assert "telegram:123" in result
+
+    def test_late_finalization_in_retry_path_records_clean_error(self):
+        """If sys.is_finalizing() flips to True between the early guard and
+        the ThreadPoolExecutor.submit call, the submit itself raises
+        'cannot schedule new futures after interpreter shutdown'. The retry
+        path must catch this and record a clean 'skipped' error rather than
+        bubbling the raw RuntimeError out of _deliver_result.
+        """
+        job, mock_cfg = self._make_job()
+        standalone_send = MagicMock(return_value=self._CloseableAwaitable())
+
+        # Force asyncio.run to raise (the original coro was never started by us,
+        # so coro.close() must succeed cleanly).
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("cron.scheduler.sys.is_finalizing", return_value=False), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send), \
+             patch("asyncio.run", side_effect=RuntimeError("Event loop is closed")), \
+             patch("concurrent.futures.ThreadPoolExecutor") as pool_cls:
+            pool = MagicMock()
+            pool.submit.return_value.result.side_effect = RuntimeError(
+                "cannot schedule new futures after interpreter shutdown"
+            )
+            pool.__enter__.return_value = pool
+            pool.__exit__.return_value = False
+            pool_cls.return_value = pool
+            result = _deliver_result(job, "Hello world")
+
+        # Pool was used (we entered the retry), but the late-shutdown error
+        # must have been caught and recorded as a clean delivery error.
+        pool.submit.assert_called_once()
+        assert result is not None
+        assert "interpreter shutdown" in result or "skipped" in result
+
+    def test_inner_coro_runtime_error_does_not_crash_on_close(self):
+        """When asyncio.run raises a RuntimeError from inside the coroutine
+        (not the 'running loop' check), coro.close() may raise 'cannot reuse
+        already awaited coroutine'. The patch wraps coro.close() in
+        try/except, so this scenario must NOT propagate the close() error.
+        """
+        job, mock_cfg = self._make_job()
+        standalone_send = MagicMock(side_effect=[
+            self._CloseableAwaitable(RuntimeError("cannot reuse already awaited coroutine")),
+            self._CloseableAwaitable(),
+        ])
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("cron.scheduler.sys.is_finalizing", return_value=False), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send), \
+             patch("asyncio.run", side_effect=RuntimeError("inner send failed")), \
+             patch("concurrent.futures.ThreadPoolExecutor") as pool_cls:
+            # Pool.submit succeeds, future.result returns success — confirms
+            # the retry path completed without the close() error short-circuiting.
+            pool = MagicMock()
+            pool.submit.return_value.result.return_value = {"success": True}
+            pool.__enter__.return_value = pool
+            pool.__exit__.return_value = False
+            pool_cls.return_value = pool
+            result = _deliver_result(job, "Hello world")
+
+        assert result is None, f"expected successful delivery, got: {result!r}"
