@@ -98,7 +98,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_INITIAL_STATUSES = {"running", "ready", "todo", "triage", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -2207,8 +2207,18 @@ def create_task(
                         missing = _find_missing_parents(conn, parents)
                         if missing:
                             raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                elif triage:
+                elif triage or initial_status == "triage":
                     task_status = "triage"
+                    if parents:
+                        missing = _find_missing_parents(conn, parents)
+                        if missing:
+                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+                elif initial_status == "todo":
+                    task_status = "todo"
+                    if parents:
+                        missing = _find_missing_parents(conn, parents)
+                        if missing:
+                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                 else:
                     task_status = "ready"
                     if parents:
@@ -2223,13 +2233,6 @@ def create_task(
                         ).fetchall()
                         if any(r["status"] != "done" for r in rows):
                             task_status = "todo"
-                # Even in triage mode we still need to validate parent ids
-                # so the eventual link rows don't dangle.
-                if triage and parents:
-                    missing = _find_missing_parents(conn, parents)
-                    if missing:
-                        raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-
                 conn.execute(
                     """
                     INSERT INTO tasks (
