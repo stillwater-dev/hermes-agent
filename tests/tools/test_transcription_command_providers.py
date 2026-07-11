@@ -486,6 +486,27 @@ class TestTranscribeAudioDispatchToCommandProvider:
         assert result["transcript"] == "dispatched via command"
         assert result["provider"] == "fake-cli"
 
+    def test_per_call_provider_overrides_configured_default(self, tmp_path):
+        audio = _make_silent_wav(tmp_path / "audio.wav")
+        cfg = {
+            "provider": "default-cli",
+            "providers": {
+                "default-cli": {
+                    "type": "command",
+                    "command": _python_emit_command("wrong provider"),
+                },
+                "requested-cli": {
+                    "type": "command",
+                    "command": _python_emit_command("explicit provider"),
+                },
+            },
+        }
+        with patch("tools.transcription_tools._load_stt_config", return_value=cfg):
+            result = transcribe_audio(str(audio), provider="requested-cli")
+
+        assert result["transcript"] == "explicit provider"
+        assert result["provider"] == "requested-cli"
+
     def test_builtin_name_shadow_does_not_route_to_command(self, tmp_path):
         # User mis-configures stt.providers.openai as a command — must NOT
         # hijack the real OpenAI built-in. The built-in elif chain owns

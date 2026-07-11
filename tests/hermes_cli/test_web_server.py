@@ -610,6 +610,90 @@ class TestWebServerEndpoints:
         assert "/api/audio/speak" in paths
         assert "/api/audio/elevenlabs/voices" in paths
 
+    def test_audio_provider_discovery_reads_live_named_instances(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server,
+            "load_config",
+            lambda: {
+                "tts": {
+                    "provider": "supertonic-m1",
+                    "providers": {
+                        "supertonic-m1": {
+                            "type": "command",
+                            "label": "Supertonic M1",
+                            "family": "supertonic",
+                        }
+                    },
+                },
+                "stt": {
+                    "provider": "parakeet-lan",
+                    "providers": {
+                        "parakeet-lan": {
+                            "type": "command",
+                            "display_name": "Parakeet LAN",
+                            "backend": "parakeet",
+                        }
+                    },
+                },
+            },
+        )
+
+        body = self.client.get("/api/audio/providers").json()
+
+        assert body["tts"]["current"] == "supertonic-m1"
+        assert body["tts"]["provider_details"][-1] == {
+            "name": "supertonic-m1",
+            "label": "Supertonic M1",
+            "family": "supertonic",
+            "type": "command",
+        }
+        assert body["stt"]["current"] == "parakeet-lan"
+        assert body["stt"]["provider_details"][-1]["name"] == "parakeet-lan"
+
+    def test_audio_endpoints_forward_explicit_provider(self, monkeypatch, tmp_path):
+        import tools.transcription_tools as transcription_tools
+        import tools.tts_tool as tts_tool
+
+        captured = {}
+        audio_file = tmp_path / "speech.mp3"
+        audio_file.write_bytes(b"ID3audio")
+
+        def fake_transcribe(path, model, provider):
+            captured["stt"] = (model, provider)
+            return {"success": True, "transcript": "hello", "provider": provider}
+
+        def fake_tts(text, output_path, provider):
+            captured["tts"] = (output_path, provider)
+            return json.dumps({
+                "success": True,
+                "file_path": str(audio_file),
+                "provider": provider,
+            })
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe)
+        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+
+        stt = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "provider": "parakeet-lan",
+            },
+        )
+        tts = self.client.post(
+            "/api/audio/speak",
+            json={"text": "hello", "provider": "supertonic-m1"},
+        )
+
+        assert stt.status_code == 200
+        assert tts.status_code == 200
+        assert captured == {
+            "stt": (None, "parakeet-lan"),
+            "tts": (None, "supertonic-m1"),
+        }
+
     def test_elevenlabs_voices_unavailable_without_key(self, monkeypatch):
         import hermes_cli.web_server as web_server
 

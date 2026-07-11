@@ -239,3 +239,32 @@ def test_reviewer_approve_records_structured_rationale(monkeypatch):
     assert recorded["reviewer_rationale"] == "remote JSON is parsed as data only"
     assert recorded["reviewer_safe_factors"] == ["local python -c parser"]
     assert recorded["reviewer_risk_factors"] == []
+
+
+def test_reviewer_failure_uses_configured_fallback_task(monkeypatch):
+    calls = []
+
+    def fake_config(task):
+        if task == "approval_reviewer":
+            return {"fallback_task": "approval_reviewer_fallback"}
+        if task == "approval_reviewer_fallback":
+            return {"model": "fallback-model"}
+        return {}
+
+    monkeypatch.setattr(A, "_get_auxiliary_task_config_for_approval", fake_config)
+    monkeypatch.setattr(
+        A, "_agentic_reviewer_approve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("primary failed")),
+    )
+    monkeypatch.setattr(
+        A, "_auxiliary_reviewer_approve",
+        lambda _command, _description, *, task: (
+            calls.append(task) or ("approve", {"rationale": "fallback", "safe_factors": [], "risk_factors": []})
+        ),
+    )
+    monkeypatch.setattr(A, "_record_reviewer_verdict", lambda *_args, **_kwargs: None)
+
+    verdict = A._reviewer_approve("pytest", "test warning", task="approval_reviewer")
+
+    assert verdict == "approve"
+    assert calls == ["approval_reviewer_fallback"]

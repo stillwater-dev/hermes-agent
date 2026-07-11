@@ -3613,6 +3613,123 @@ def test_gateway_dispatcher_watcher_env_truthy_uses_config(monkeypatch):
     )
 
 
+def test_gateway_dispatcher_env_board_allowlist(monkeypatch, tmp_path):
+    """HERMES_KANBAN_DISPATCH_BOARDS limits the boards dispatched."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from gateway.run import GatewayRunner
+    import hermes_cli.config as _cfg_mod
+    import hermes_cli.kanban_db as _kb
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    dispatched = []
+
+    monkeypatch.setenv("HERMES_KANBAN_DISPATCH_BOARDS", " beta ")
+    monkeypatch.setattr(
+        _cfg_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        _kb, "list_boards",
+        lambda include_archived=False: [{"slug": "alpha"}, {"slug": "beta"}],
+    )
+    monkeypatch.setattr(_kb, "kanban_db_path", lambda board=None: tmp_path / f"{board}.db")
+    monkeypatch.setattr(_kb, "connect", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(
+        _kb, "dispatch_once",
+        lambda _conn, *, board, **_kwargs: dispatched.append(board),
+    )
+    monkeypatch.setattr(_kb, "has_spawnable_ready", lambda _conn: False)
+    monkeypatch.setattr(_kb, "has_spawnable_review", lambda _conn: False)
+    monkeypatch.setattr(_kb, "reap_worker_zombies", lambda: [])
+
+    async def _to_thread(fn, *args, **kwargs):
+        result = fn(*args, **kwargs)
+        if getattr(fn, "__name__", "") == "_tick_once":
+            runner._running = False
+        return result
+
+    async def _sleep(_delay):
+        return None
+
+    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
+
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    assert dispatched == ["beta"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_calls"),
+    [("default", 1), ("worker", 0)],
+)
+def test_gateway_auto_decompose_only_routes_through_default_profile(
+    monkeypatch, tmp_path, profile, expected_calls
+):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from gateway.run import GatewayRunner
+    import hermes_cli.config as _cfg_mod
+    import hermes_cli.kanban_db as _kb
+    import hermes_cli.kanban_decompose as _decomp
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._active_profile_name = lambda: profile
+    decomposition_calls = []
+
+    monkeypatch.delenv("HERMES_KANBAN_DISPATCH_BOARDS", raising=False)
+    monkeypatch.setattr(
+        _cfg_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": True,
+            }
+        },
+    )
+    monkeypatch.setattr(_kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
+    monkeypatch.setattr(_kb, "kanban_db_path", lambda board=None: tmp_path / "kanban.db")
+    monkeypatch.setattr(_kb, "connect", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(_kb, "dispatch_once", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_kb, "has_spawnable_ready", lambda _conn: False)
+    monkeypatch.setattr(_kb, "has_spawnable_review", lambda _conn: False)
+    monkeypatch.setattr(_kb, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(
+        _decomp, "list_triage_ids",
+        lambda: decomposition_calls.append(profile) or [],
+    )
+
+    async def _to_thread(fn, *args, **kwargs):
+        result = fn(*args, **kwargs)
+        if getattr(fn, "__name__", "") == "_tick_once":
+            runner._running = False
+        return result
+
+    async def _sleep(_delay):
+        return None
+
+    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
+
+    asyncio.run(runner._kanban_dispatcher_watcher())
+
+    assert len(decomposition_calls) == expected_calls
+
+
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
 def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
     monkeypatch, tmp_path, caplog, corrupt_exc
