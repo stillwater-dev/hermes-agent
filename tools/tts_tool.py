@@ -1838,6 +1838,7 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -1852,6 +1853,10 @@ def text_to_speech_tool(
     Args:
         text: The text to convert to speech.
         output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        provider: Optional per-call provider override. When omitted, Hermes
+            uses ``tts.provider`` from config.yaml. This keeps voice modular:
+            UIs can offer multiple configured providers without rewriting the
+            global default or restarting the gateway.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -1860,7 +1865,7 @@ def text_to_speech_tool(
         return tool_error("Text is required", success=False)
 
     tts_config = _load_tts_config()
-    provider = _get_provider(tts_config)
+    provider = (provider or "").strip() or _get_provider(tts_config)
 
     # User-declared command provider (type: command under tts.providers.<name>)
     # resolves BEFORE the built-in dispatch. Built-in names short-circuit here
@@ -2533,6 +2538,10 @@ TTS_SCHEMA = {
             "output_path": {
                 "type": "string",
                 "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+            },
+            "provider": {
+                "type": "string",
+                "description": "Optional per-call TTS provider instance name (for example supertonic, supertonic-m1, minimax). Defaults to tts.provider from config."
             }
         },
         "required": ["text"]
@@ -2545,7 +2554,8 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path")),
+        output_path=args.get("output_path"),
+        provider=args.get("provider")),
     check_fn=check_tts_requirements,
     emoji="🔊",
 )

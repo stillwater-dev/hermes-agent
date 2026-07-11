@@ -179,6 +179,10 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 
 **Workspace may have stale artifacts.** Especially `dir:` and `worktree` workspaces can have files from previous runs. Read the comment thread — it usually explains why you're running again and what state the workspace is in.
 
+**Operator-created worktree cards need explicit, precreated paths.** If a card says “workspace must be the main repo” or the dispatcher resolves a `worktree` card to the main checkout, stop and block/reclaim rather than editing shared `master`. Safer pattern for human operators: create a branch name plus explicit `/root/<project>-worktrees/<task-name>` path, precreate it with `git worktree add <path> <branch>`, comment the path on the card, then dispatch one worker. Verify with `git worktree list` and `git status --short --branch` before integrating.
+
+**Profile-scoped skills can break otherwise-valid providers.** A profile/model smoke test can pass while a card still fails at startup if the dispatcher preloads a skill not installed in that profile. If a profile is known to lack a skill, do not force it in the card; either install/symlink the skill first or create the card with no forced skill and put required workflow instructions in the body. Treat `spawn_failed` or immediate `pid not alive` after a skill preload error as profile setup, not task failure.
+
 **Don't rely on the CLI when the guidance is available.** The `kanban_*` tools work across all terminal backends (Docker, Modal, SSH). `hermes kanban <verb>` from your terminal tool will fail in containerized backends because the CLI isn't installed there. When in doubt, use the tool.
 
 ## CLI fallback (for scripting)

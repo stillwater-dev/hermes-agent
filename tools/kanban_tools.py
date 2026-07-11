@@ -28,6 +28,7 @@ through the board.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -759,6 +760,15 @@ def _handle_create(args: dict, **kw) -> str:
     if bool_error:
         return tool_error(bool_error)
     idempotency_key = args.get("idempotency_key")
+    created_by = os.environ.get("HERMES_PROFILE") or "worker"
+    board = args.get("board")
+    if not idempotency_key and str(session_id or "").startswith("cron_"):
+        board_slug = str(board or os.environ.get("HERMES_KANBAN_BOARD") or "default")
+        # ponytail: cron managers must be retry-safe even when the model forgets.
+        digest = hashlib.sha256(
+            f"{board_slug}\n{created_by}\n{session_id}\n{title}\n{body or ''}".encode()
+        ).hexdigest()[:16]
+        idempotency_key = f"cron-auto:{board_slug}:{created_by}:{digest}"
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
@@ -779,7 +789,6 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
-    board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         try:
@@ -814,7 +823,7 @@ def _handle_create(args: dict, **kw) -> str:
                     int(goal_max_turns) if goal_max_turns is not None else None
                 ),
                 initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                created_by=created_by,
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)

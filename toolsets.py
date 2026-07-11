@@ -274,6 +274,15 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "kanban_manager_lite": {
+        "description": "Kanban inspect/comment/create/link subset for autonomous cron managers.",
+        "tools": [
+            "kanban_show", "kanban_list", "kanban_comment",
+            "kanban_create", "kanban_link",
+        ],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],

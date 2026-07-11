@@ -1559,6 +1559,22 @@ def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawna
         assert kb.get_task(conn, t).claim_lock is None
 
 
+def test_dispatch_default_spawn_without_pid_releases_claim(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setattr(kb, "_default_spawn", lambda *args, **kwargs: None)
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="nopid", assignee="alice")
+        res = kb.dispatch_once(conn, failure_limit=2)
+        task = kb.get_task(conn, t)
+
+    assert res.spawned == []
+    assert task.status == "ready"
+    assert task.claim_lock is None
+    assert task.worker_pid is None
+    assert task.last_failure_error == "default spawn returned no pid"
+
 def test_dispatch_max_spawn_counts_existing_running_tasks(
     kanban_home, all_assignees_spawnable
 ):

@@ -549,6 +549,91 @@ for _k, _v in CONFIG_SCHEMA.items():
 CONFIG_SCHEMA = _ordered_schema
 
 
+_BUILTIN_TTS_OPTIONS: Tuple[str, ...] = (
+    "edge", "elevenlabs", "openai", "minimax", "xai", "mistral",
+    "gemini", "neutts", "kittentts", "piper",
+)
+_BUILTIN_STT_OPTIONS: Tuple[str, ...] = (
+    "local", "local_command", "groq", "openai", "mistral", "xai",
+    "elevenlabs",
+)
+
+
+def _voice_provider_names(section: str, builtins: Tuple[str, ...]) -> List[str]:
+    """Return built-in plus user-declared voice provider names from live config."""
+    return [entry["name"] for entry in _voice_provider_entries(section, builtins)]
+
+
+def _voice_provider_entries(section: str, builtins: Tuple[str, ...]) -> List[Dict[str, Any]]:
+    """Return provider metadata from built-ins plus live user-declared instances.
+
+    ``tts.providers`` / ``stt.providers`` can contain many named entries with
+    the same backend family (for example ``supertonic-m1``, ``supertonic-f3``,
+    ``parakeet-lan``, ``parakeet-dockge``). The provider *name* is the stable
+    per-call selector; optional ``label``/``family`` fields are presentation
+    metadata for Control/Voice/Chat clients.
+    """
+    try:
+        config = load_config() or {}
+    except Exception:
+        config = {}
+    voice_cfg = config.get(section, {}) if isinstance(config, dict) else {}
+    providers = voice_cfg.get("providers", {}) if isinstance(voice_cfg, dict) else {}
+    entries: List[Dict[str, Any]] = [
+        {"name": name, "label": name, "family": name, "type": "builtin"}
+        for name in builtins
+    ]
+    seen = {name for name in builtins}
+    if isinstance(providers, dict):
+        for name, provider_cfg in providers.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(provider_cfg, dict):
+                continue
+            clean_name = name.strip()
+            if clean_name in seen:
+                continue
+            seen.add(clean_name)
+            label = str(
+                provider_cfg.get("label")
+                or provider_cfg.get("display_name")
+                or clean_name
+            ).strip() or clean_name
+            family = str(
+                provider_cfg.get("family")
+                or provider_cfg.get("backend")
+                or provider_cfg.get("engine")
+                or provider_cfg.get("type")
+                or "custom"
+            ).strip() or "custom"
+            entries.append({
+                "name": clean_name,
+                "label": label,
+                "family": family,
+                "type": str(provider_cfg.get("type") or "custom").strip() or "custom",
+            })
+    return entries
+
+
+def _schema_with_live_voice_providers() -> Dict[str, Dict[str, Any]]:
+    """Return config schema with hot-loaded command/plugin voice providers.
+
+    The base CONFIG_SCHEMA is built at import time, but command providers can
+    be added to config.yaml while the dashboard/gateway is running. Updating
+    select options here keeps the voice settings modular and restart-free.
+    """
+    schema = {key: dict(value) for key, value in CONFIG_SCHEMA.items()}
+    if "tts.provider" in schema:
+        schema["tts.provider"]["options"] = _voice_provider_names(
+            "tts", _BUILTIN_TTS_OPTIONS,
+        )
+    if "stt.provider" in schema:
+        schema["stt.provider"]["options"] = _voice_provider_names(
+            "stt", _BUILTIN_STT_OPTIONS,
+        )
+    return schema
+
+
 class ConfigUpdate(BaseModel):
     config: dict
 
@@ -583,6 +668,7 @@ class TelegramOnboardingApply(BaseModel):
 class AudioTranscriptionRequest(BaseModel):
     data_url: str
     mime_type: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class ModelAssignment(BaseModel):
@@ -1384,7 +1470,12 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
         from tools.transcription_tools import transcribe_audio
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, transcribe_audio, temp_path)
+        if payload.provider:
+            result = await loop.run_in_executor(
+                None, transcribe_audio, temp_path, None, payload.provider
+            )
+        else:
+            result = await loop.run_in_executor(None, transcribe_audio, temp_path)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1412,6 +1503,33 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    provider: Optional[str] = None
+
+
+@app.get("/api/audio/providers")
+async def get_audio_providers():
+    """Return voice providers available right now from live config.
+
+    This endpoint is intentionally live rather than cached at import time so
+    command providers added to config.yaml can appear in clients without a
+    gateway restart. Per-call audio endpoints can pass one of these provider
+    names in the request body to avoid making voice a single global either/or.
+    """
+    config = load_config() or {}
+    tts_cfg = config.get("tts", {}) if isinstance(config, dict) else {}
+    stt_cfg = config.get("stt", {}) if isinstance(config, dict) else {}
+    return {
+        "tts": {
+            "current": tts_cfg.get("provider") if isinstance(tts_cfg, dict) else None,
+            "providers": _voice_provider_names("tts", _BUILTIN_TTS_OPTIONS),
+            "provider_details": _voice_provider_entries("tts", _BUILTIN_TTS_OPTIONS),
+        },
+        "stt": {
+            "current": stt_cfg.get("provider") if isinstance(stt_cfg, dict) else None,
+            "providers": _voice_provider_names("stt", _BUILTIN_STT_OPTIONS),
+            "provider_details": _voice_provider_entries("stt", _BUILTIN_STT_OPTIONS),
+        },
+    }
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -1487,7 +1605,12 @@ async def speak_text(payload: TTSSpeakRequest):
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+        if payload.provider:
+            result_json = await loop.run_in_executor(
+                None, text_to_speech_tool, text, None, payload.provider
+            )
+        else:
+            result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
@@ -1941,7 +2064,7 @@ async def get_defaults():
 
 @app.get("/api/config/schema")
 async def get_schema():
-    return {"fields": CONFIG_SCHEMA, "category_order": _CATEGORY_ORDER}
+    return {"fields": _schema_with_live_voice_providers(), "category_order": _CATEGORY_ORDER}
 
 
 _EMPTY_MODEL_INFO: dict = {

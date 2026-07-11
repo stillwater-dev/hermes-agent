@@ -299,6 +299,7 @@ _tts_playing.set()  # initially "not playing"
 _continuous_on_transcript: Optional[Callable[[str], None]] = None
 _continuous_on_status: Optional[Callable[[str], None]] = None
 _continuous_on_silent_limit: Optional[Callable[[], None]] = None
+_continuous_provider: Optional[str] = None
 _continuous_no_speech_count = 0
 _CONTINUOUS_NO_SPEECH_LIMIT = 3
 
@@ -321,7 +322,7 @@ def start_recording() -> None:
         _recorder = rec
 
 
-def stop_and_transcribe() -> Optional[str]:
+def stop_and_transcribe(provider: Optional[str] = None) -> Optional[str]:
     """Stop the active push-to-talk recording, transcribe, return text.
 
     Returns ``None`` when no recording is active, when the microphone
@@ -341,7 +342,10 @@ def stop_and_transcribe() -> Optional[str]:
         return None
 
     try:
-        result = transcribe_recording(wav_path)
+        result = (
+            transcribe_recording(wav_path, provider=provider)
+            if provider else transcribe_recording(wav_path)
+        )
     except Exception as e:
         logger.warning("voice transcription failed: %s", e)
         return None
@@ -373,6 +377,7 @@ def start_continuous(
     silence_threshold: int = 200,
     silence_duration: float = 3.0,
     auto_restart: bool = True,
+    provider: Optional[str] = None,
 ) -> bool:
     """Start a VAD-driven continuous recording loop.
 
@@ -393,7 +398,7 @@ def start_continuous(
     """
     global _continuous_active, _continuous_recorder, _continuous_auto_restart
     global _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit
-    global _continuous_no_speech_count
+    global _continuous_provider, _continuous_no_speech_count
 
     with _continuous_lock:
         if _continuous_active:
@@ -407,6 +412,7 @@ def start_continuous(
         _continuous_on_transcript = on_transcript
         _continuous_on_status = on_status
         _continuous_on_silent_limit = on_silent_limit
+        _continuous_provider = provider
         if auto_restart:
             _continuous_no_speech_count = 0
 
@@ -454,7 +460,7 @@ def stop_continuous(force_transcribe: bool = False) -> None:
     """
     global _continuous_active, _continuous_on_transcript, _continuous_stopping
     global _continuous_on_status, _continuous_on_silent_limit
-    global _continuous_recorder, _continuous_no_speech_count
+    global _continuous_recorder, _continuous_no_speech_count, _continuous_provider
 
     with _continuous_lock:
         if not _continuous_active:
@@ -464,12 +470,14 @@ def stop_continuous(force_transcribe: bool = False) -> None:
         on_status = _continuous_on_status
         on_transcript = _continuous_on_transcript
         on_silent_limit = _continuous_on_silent_limit
+        stt_provider = _continuous_provider
         auto_restart = _continuous_auto_restart
         track_no_speech = force_transcribe and not auto_restart
         _continuous_stopping = rec is not None
         _continuous_on_transcript = None
         _continuous_on_status = None
         _continuous_on_silent_limit = None
+        _continuous_provider = None
         if not track_no_speech:
             _continuous_no_speech_count = 0
 
@@ -498,7 +506,10 @@ def stop_continuous(force_transcribe: bool = False) -> None:
                 try:
                     if wav_path:
                         try:
-                            result = transcribe_recording(wav_path)
+                            result = (
+                                transcribe_recording(wav_path, provider=stt_provider)
+                                if stt_provider else transcribe_recording(wav_path)
+                            )
                             if result.get("success"):
                                 text = (result.get("transcript") or "").strip()
                                 if text and not is_whisper_hallucination(text):
@@ -591,6 +602,7 @@ def _continuous_on_silence() -> None:
         on_transcript = _continuous_on_transcript
         on_status = _continuous_on_status
         on_silent_limit = _continuous_on_silent_limit
+        stt_provider = _continuous_provider
 
     if rec is None:
         _debug("_continuous_on_silence: no recorder — abort")
@@ -619,7 +631,10 @@ def _continuous_on_silence() -> None:
 
     if wav_path:
         try:
-            result = transcribe_recording(wav_path)
+            result = (
+                transcribe_recording(wav_path, provider=stt_provider)
+                if stt_provider else transcribe_recording(wav_path)
+            )
             # transcribe_recording returns {"success": bool, "transcript": str,
             # "error": str?} — NOT {"text": str}.  Using the wrong key silently
             # produced empty transcripts even when Groq/local STT returned fine,
@@ -737,7 +752,7 @@ def _continuous_on_silence() -> None:
 # ── TTS API ──────────────────────────────────────────────────────────
 
 
-def speak_text(text: str) -> None:
+def speak_text(text: str, provider: Optional[str] = None) -> None:
     """Synthesize ``text`` with the configured TTS provider and play it.
 
     Mirrors cli.py:_voice_speak_response exactly — same markdown strip
@@ -807,7 +822,7 @@ def speak_text(text: str) -> None:
         )
 
         _debug(f"speak_text: synthesizing {len(tts_text)} chars -> {mp3_path}")
-        text_to_speech_tool(text=tts_text, output_path=mp3_path)
+        text_to_speech_tool(text=tts_text, output_path=mp3_path, provider=provider)
 
         if os.path.isfile(mp3_path) and os.path.getsize(mp3_path) > 0:
             _debug(f"speak_text: playing {mp3_path} ({os.path.getsize(mp3_path)} bytes)")

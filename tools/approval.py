@@ -1279,6 +1279,34 @@ def _auxiliary_reviewer_approve(command: str, description: str, *, task: str = "
     return parsed["verdict"], parsed
 
 
+def _record_reviewer_verdict(
+    command: str,
+    description: str,
+    task: str,
+    verdict: str,
+    parsed: dict,
+    reason: str,
+) -> None:
+    _record_approval_event(
+        "reviewer_verdict",
+        command=command,
+        description=description,
+        reviewer_task=task,
+        reviewer_verdict=verdict,
+        reviewer_rationale=parsed.get("rationale", ""),
+        reviewer_safe_factors=parsed.get("safe_factors") or [],
+        reviewer_risk_factors=parsed.get("risk_factors") or [],
+        approved=True if verdict == "approve" else (False if verdict == "deny" else None),
+        reason=reason,
+    )
+
+
+def _reviewer_fallback_task(task: str) -> str:
+    cfg = _get_auxiliary_task_config_for_approval(task)
+    fallback = str(cfg.get("fallback_task") or "").strip()
+    return fallback or f"{task}_fallback"
+
+
 def _reviewer_approve(command: str, description: str, *, task: str = "approval") -> str:
     """Use an independent reviewer to assess risk and decide approval.
 
@@ -1293,21 +1321,23 @@ def _reviewer_approve(command: str, description: str, *, task: str = "approval")
         else:
             verdict, parsed = _auxiliary_reviewer_approve(command, description, task=task)
             reason = "auxiliary_reviewer"
-        _record_approval_event(
-            "reviewer_verdict",
-            command=command,
-            description=description,
-            reviewer_task=task,
-            reviewer_verdict=verdict,
-            reviewer_rationale=parsed.get("rationale", ""),
-            reviewer_safe_factors=parsed.get("safe_factors") or [],
-            reviewer_risk_factors=parsed.get("risk_factors") or [],
-            approved=True if verdict == "approve" else (False if verdict == "deny" else None),
-            reason=reason,
-        )
+        _record_reviewer_verdict(command, description, task, verdict, parsed, reason)
         return verdict
 
     except Exception as e:
+        fallback_task = _reviewer_fallback_task(task)
+        if fallback_task != task and _get_auxiliary_task_config_for_approval(fallback_task):
+            try:
+                verdict, parsed = _auxiliary_reviewer_approve(
+                    command, description, task=fallback_task)
+                _record_reviewer_verdict(
+                    command, description, fallback_task, verdict, parsed,
+                    f"auxiliary_reviewer_fallback:{type(e).__name__}")
+                return verdict
+            except Exception as fallback_error:
+                logger.debug(
+                    "Reviewer approval fallback (%s): reviewer failed (%s)",
+                    fallback_task, fallback_error)
         logger.debug("Reviewer approval (%s): reviewer failed (%s), escalating", task, e)
         _record_approval_event(
             "reviewer_verdict",

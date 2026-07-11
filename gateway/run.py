@@ -5755,6 +5755,45 @@ class GatewayRunner:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return
 
+        def _dispatch_board_allowlist(raw) -> "Optional[set[str]]":
+            if raw is None:
+                return None
+            if isinstance(raw, (list, tuple, set)):
+                pieces = [str(item).strip() for item in raw if str(item).strip()]
+                raw_text = ",".join(pieces)
+            else:
+                raw_text = str(raw).strip()
+                pieces = [part.strip() for part in raw_text.split(",") if part.strip()]
+            if not raw_text:
+                return None
+            if raw_text.lower() in {"0", "false", "no", "off", "none", "disabled"}:
+                return set()
+            allowed: set[str] = set()
+            for piece in pieces:
+                try:
+                    slug = _kb._normalize_board_slug(piece) or _kb.DEFAULT_BOARD
+                except Exception:
+                    logger.warning("kanban dispatcher: ignoring invalid dispatch board %r", piece)
+                    continue
+                allowed.add(slug)
+            return allowed
+
+        dispatch_boards = _dispatch_board_allowlist(
+            os.environ.get("HERMES_KANBAN_DISPATCH_BOARDS")
+        )
+        if dispatch_boards is None:
+            dispatch_boards = _dispatch_board_allowlist(
+                kanban_cfg.get("dispatch_boards")
+            )
+        if dispatch_boards is not None:
+            if dispatch_boards:
+                logger.info(
+                    "kanban dispatcher: restricted to boards %s",
+                    ", ".join(sorted(dispatch_boards)),
+                )
+            else:
+                logger.info("kanban dispatcher: no boards configured; embedded dispatcher idle")
+
         try:
             interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
         except (ValueError, TypeError):
@@ -5999,6 +6038,19 @@ class GatewayRunner:
                     except Exception:
                         pass
 
+        def _dispatchable_board_slugs() -> "list[str]":
+            try:
+                boards = _kb.list_boards(include_archived=False)
+            except Exception:
+                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            slugs: list[str] = [
+                (b.get("slug") or _kb.DEFAULT_BOARD)
+                for b in boards
+            ]
+            if dispatch_boards is not None:
+                slugs = [slug for slug in slugs if slug in dispatch_boards]
+            return slugs
+
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
 
@@ -6006,13 +6058,8 @@ class GatewayRunner:
             when users create a new board mid-run: no restart required,
             the next tick picks it up automatically.
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug in _dispatchable_board_slugs():
                 out.append((slug, _tick_once_for_board(slug)))
             return out
 
@@ -6028,12 +6075,7 @@ class GatewayRunner:
             here keeps the stuck-warn fire only on real failures (broken
             PATH, missing venv, credential loss for a real Hermes profile).
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug in _dispatchable_board_slugs():
                 conn = None
                 try:
                     conn = _kb.connect(board=slug)
@@ -6162,7 +6204,9 @@ class GatewayRunner:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
             try:
-                if auto_decompose_enabled:
+                # Run the auto-decomposer only in the default gateway profile to avoid
+                # N gateways decomposing the same triage task into duplicate children.
+                if auto_decompose_enabled and self._active_profile_name() == "default":
                     await asyncio.to_thread(_auto_decompose_tick)
                 results = await asyncio.to_thread(_tick_once)
                 any_spawned = False
