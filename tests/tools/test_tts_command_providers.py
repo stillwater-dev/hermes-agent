@@ -475,6 +475,24 @@ class TestTextToSpeechToolWithCommandProvider:
 
         assert json.loads(result)["provider"] == "requested-cli"
 
+    def test_unknown_per_call_provider_does_not_fall_back_to_edge(
+        self, tmp_path
+    ):
+        with patch("tools.tts_tool._import_edge_tts") as import_edge:
+            with patch(
+                "tools.tts_tool._load_tts_config", return_value={"provider": "edge"}
+            ):
+                result = text_to_speech_tool(
+                    text="hi",
+                    output_path=str(tmp_path / "clip.mp3"),
+                    provider="does-not-exist",
+                )
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "Unknown TTS provider override: does-not-exist" in data["error"]
+        import_edge.assert_not_called()
+
     def test_voice_compatible_opt_in_toggles_flag(self, tmp_path):
         """voice_compatible=true is reflected in the response when the
         file is already .ogg (no ffmpeg needed)."""

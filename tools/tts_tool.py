@@ -2177,7 +2177,8 @@ def text_to_speech_tool(
         return tool_error("Text is required", success=False)
 
     tts_config = _load_tts_config()
-    provider = (provider or "").strip().lower() or _get_provider(tts_config)
+    provider_override = (provider or "").strip().lower()
+    provider = provider_override or _get_provider(tts_config)
 
     # User-declared command provider (type: command under tts.providers.<name>)
     # resolves BEFORE the built-in dispatch. Built-in names short-circuit here
@@ -2355,6 +2356,11 @@ def text_to_speech_tool(
                 }, ensure_ascii=False)
             logger.info("Generating speech with Piper (local)...")
             _generate_piper_tts(text, file_str, tts_config)
+
+        elif provider_override and provider not in BUILTIN_TTS_PROVIDERS:
+            return tool_error(
+                f"Unknown TTS provider override: {provider}", success=False
+            )
 
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
