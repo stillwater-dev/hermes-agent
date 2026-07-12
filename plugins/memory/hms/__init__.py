@@ -28,10 +28,19 @@ class HMSMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._profile:
             return ""
+        if os.environ.get("HERMES_MEMORY_BLOCKS_READ", "1").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return ""
         try:
-            base_url = os.environ.get("HMS_BASE_URL", "http://127.0.0.1:7821").rstrip("/")
+            base_url = os.environ.get(
+                "HMS_BASE_URL",
+                os.environ.get("HERMES_HMS_URL", "http://127.0.0.1:7821"),
+            ).rstrip("/")
             query = urllib.parse.urlencode({"profile": self._profile})
-            timeout = float(os.environ.get("HMS_TIMEOUT_S", "2.0"))
+            timeout = float(os.environ.get(
+                "HMS_TIMEOUT_S", os.environ.get("HERMES_HMS_TIMEOUT", "2.0")
+            ))
             with urllib.request.urlopen(
                 f"{base_url}/memories/blocks/context?{query}", timeout=timeout
             ) as response:
