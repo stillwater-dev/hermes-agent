@@ -35,6 +35,10 @@ def test_provider_discovery_and_profile_scoped_read(monkeypatch):
     assert urlopen.call_args.kwargs["timeout"] == 1.25
 
 
+def test_legacy_hermes_service_name_loads_hms():
+    assert isinstance(load_memory_provider("hermes_service"), HMSMemoryProvider)
+
+
 def test_read_fails_soft_without_profile_or_valid_response():
     provider = HMSMemoryProvider()
     assert provider.system_prompt_block() == ""

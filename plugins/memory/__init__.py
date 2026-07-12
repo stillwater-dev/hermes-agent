@@ -189,6 +189,7 @@ def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
 
     Returns None if the provider is not found or fails to load.
     """
+    name = "hms" if name == "hermes_service" else name
     provider_dir = find_provider_dir(name)
     if not provider_dir:
         logger.debug("Memory provider '%s' not found in bundled or user plugins", name)
