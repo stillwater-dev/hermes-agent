@@ -7298,6 +7298,8 @@ def _dispatch_once_locked(
                     pid = _spawn(claimed, str(workspace))
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
+            if pid is None and spawn_fn is None:
+                raise RuntimeError("default spawn returned no pid")
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             # NOTE: we intentionally do NOT reset consecutive_failures
@@ -7393,6 +7395,8 @@ def _dispatch_once_locked(
                     pid = _spawn(claimed, str(workspace))
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
+            if pid is None and spawn_fn is None:
+                raise RuntimeError("default spawn returned no pid")
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))

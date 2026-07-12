@@ -1125,6 +1125,29 @@ def test_create_session_id_absent_when_env_unset(monkeypatch, worker_env):
         conn.close()
 
 
+def test_cron_create_without_board_is_retry_safe(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_library_daily")
+    args = {"title": "Review backlog", "body": "Triage cards", "assignee": "library"}
+    first = json.loads(kt._handle_create(args))
+    second = json.loads(kt._handle_create(args))
+
+    assert first["task_id"] == second["task_id"]
+
+
+def test_separate_cron_sessions_create_separate_cards(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    args = {"title": "Review backlog", "body": "Triage cards", "assignee": "library"}
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_library_run_1")
+    first = json.loads(kt._handle_create(args))
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_library_run_2")
+    second = json.loads(kt._handle_create(args))
+
+    assert first["task_id"] != second["task_id"]
+
+
 def test_create_rejects_no_title(worker_env):
     from tools import kanban_tools as kt
     assert json.loads(kt._handle_create({"assignee": "x"})).get("error")
