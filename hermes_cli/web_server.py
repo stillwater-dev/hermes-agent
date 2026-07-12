@@ -892,6 +892,7 @@ class WhatsAppOnboardingApply(BaseModel):
 class AudioTranscriptionRequest(BaseModel):
     data_url: str
     mime_type: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class ManagedFileUpload(BaseModel):
@@ -3694,7 +3695,12 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
         from tools.transcription_tools import transcribe_audio
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, transcribe_audio, temp_path)
+        if payload.provider:
+            result = await loop.run_in_executor(
+                None, transcribe_audio, temp_path, None, payload.provider
+            )
+        else:
+            result = await loop.run_in_executor(None, transcribe_audio, temp_path)
     except HTTPException:
         raise
     except Exception as exc:
@@ -3722,6 +3728,80 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    provider: Optional[str] = None
+
+
+def _audio_provider_entries(section: str, config: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Return built-in, configured, and plugin provider metadata."""
+    if section == "tts":
+        from agent.tts_registry import list_providers
+        from tools.tts_tool import BUILTIN_TTS_PROVIDERS as builtins
+    else:
+        from agent.transcription_registry import list_providers
+        from tools.transcription_tools import BUILTIN_STT_PROVIDERS as builtins
+
+    schema_names = CONFIG_SCHEMA.get(f"{section}.provider", {}).get("options", [])
+    entries = [
+        {"name": name, "label": name, "family": name, "type": "builtin"}
+        for name in sorted(set(builtins).union(schema_names))
+    ]
+    seen = {entry["name"] for entry in entries}
+    section_config = config.get(section) if isinstance(config, dict) else {}
+    configured = (
+        section_config.get("providers") if isinstance(section_config, dict) else {}
+    )
+    if isinstance(configured, dict):
+        for raw_name, provider_config in configured.items():
+            name = str(raw_name).strip()
+            if not name or name in seen or not isinstance(provider_config, dict):
+                continue
+            entries.append({
+                "name": name,
+                "label": str(
+                    provider_config.get("label")
+                    or provider_config.get("display_name")
+                    or name
+                ),
+                "family": str(
+                    provider_config.get("family")
+                    or provider_config.get("backend")
+                    or provider_config.get("engine")
+                    or provider_config.get("type")
+                    or "custom"
+                ),
+                "type": str(provider_config.get("type") or "custom"),
+            })
+            seen.add(name)
+    for plugin in list_providers():
+        name = plugin.name.strip()
+        if name and name not in seen:
+            entries.append({
+                "name": name,
+                "label": plugin.display_name,
+                "family": "plugin",
+                "type": "plugin",
+            })
+            seen.add(name)
+    return entries
+
+
+@app.get("/api/audio/providers")
+async def get_audio_providers():
+    config = load_config() or {}
+    result = {}
+    for section in ("tts", "stt"):
+        section_config = config.get(section) if isinstance(config, dict) else {}
+        details = _audio_provider_entries(section, config)
+        result[section] = {
+            "current": (
+                section_config.get("provider")
+                if isinstance(section_config, dict)
+                else None
+            ),
+            "providers": [entry["name"] for entry in details],
+            "provider_details": details,
+        }
+    return result
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -3837,7 +3917,12 @@ async def speak_text(payload: TTSSpeakRequest):
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+        if payload.provider:
+            result_json = await loop.run_in_executor(
+                None, text_to_speech_tool, text, None, payload.provider
+            )
+        else:
+            result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")

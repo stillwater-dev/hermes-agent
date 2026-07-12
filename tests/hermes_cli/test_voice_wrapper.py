@@ -452,6 +452,27 @@ class TestContinuousLoopSimulation:
 
         voice.stop_continuous()
 
+    def test_loop_routes_explicit_provider(self, fake_recorder, monkeypatch):
+        import hermes_cli.voice as voice
+
+        providers = []
+
+        def transcribe(_path, provider=None):
+            providers.append(provider)
+            return {"success": True, "transcript": "hello"}
+
+        monkeypatch.setattr(voice, "transcribe_recording", transcribe)
+        monkeypatch.setattr(voice, "is_whisper_hallucination", lambda _t: False)
+
+        voice.start_continuous(
+            on_transcript=lambda _t: None,
+            provider="requested-cli",
+        )
+        fake_recorder.last_callback()
+
+        assert providers == ["requested-cli"]
+        voice.stop_continuous()
+
     def test_auto_restart_false_stops_after_first_transcript(self, fake_recorder, monkeypatch):
         import hermes_cli.voice as voice
 

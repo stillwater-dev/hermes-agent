@@ -875,7 +875,11 @@ def is_whisper_hallucination(transcript: str) -> bool:
 # ============================================================================
 # STT dispatch
 # ============================================================================
-def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_recording(
+    wav_path: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
     """Transcribe a WAV recording using the existing Whisper pipeline.
 
     Delegates to ``tools.transcription_tools.transcribe_audio()``.
@@ -884,6 +888,7 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
     Args:
         wav_path: Path to the WAV file.
         model: Whisper model name (default: from config or ``whisper-1``).
+        provider: Optional STT provider override for this call.
 
     Returns:
         Dict with ``success``, ``transcript``, and optionally ``error``.
@@ -891,9 +896,17 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
     from tools.transcription_tools import MAX_FILE_SIZE, transcribe_audio
 
     if _should_chunk_for_transcription(wav_path, MAX_FILE_SIZE):
-        result = _transcribe_wav_in_chunks(wav_path, model=model, max_file_size=MAX_FILE_SIZE)
+        result = _transcribe_wav_in_chunks(
+            wav_path,
+            model=model,
+            provider=provider,
+            max_file_size=MAX_FILE_SIZE,
+        )
     else:
-        result = transcribe_audio(wav_path, model=model)
+        result = (
+            transcribe_audio(wav_path, model=model, provider=provider)
+            if provider else transcribe_audio(wav_path, model=model)
+        )
 
     # Filter out Whisper hallucinations (common on silent/near-silent audio)
     if result.get("success") and is_whisper_hallucination(result.get("transcript", "")):
@@ -917,6 +930,7 @@ def _transcribe_wav_in_chunks(
     wav_path: str,
     *,
     model: Optional[str],
+    provider: Optional[str],
     max_file_size: int,
 ) -> Dict[str, Any]:
     """Split an oversized WAV into provider-sized chunks and join transcripts."""
@@ -932,7 +946,10 @@ def _transcribe_wav_in_chunks(
 
         logger.info("Transcribing oversized WAV in %d chunks: %s", len(chunk_paths), wav_path)
         for index, chunk_path in enumerate(chunk_paths, start=1):
-            result = transcribe_audio(chunk_path, model=model)
+            result = (
+                transcribe_audio(chunk_path, model=model, provider=provider)
+                if provider else transcribe_audio(chunk_path, model=model)
+            )
             if not result.get("success"):
                 error = result.get("error", "Unknown transcription error")
                 return {

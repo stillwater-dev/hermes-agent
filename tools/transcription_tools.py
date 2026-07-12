@@ -1621,7 +1621,11 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -1632,6 +1636,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
+        provider:  Override the configured provider for this call.
 
     Returns:
         dict with keys:
@@ -1654,7 +1659,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             "error": "STT is disabled in config.yaml (stt.enabled: false).",
         }
 
-    provider = _get_provider(stt_config)
+    provider = (provider or "").strip() or _get_provider(stt_config)
 
     if provider == "local":
         local_cfg = stt_config.get("local") or {}

@@ -806,9 +806,10 @@ class TestTranscribeRecording:
 
         seen_paths = []
 
-        def fake_transcribe(path, model=None):
+        def fake_transcribe(path, model=None, provider=None):
             seen_paths.append(path)
             assert model == "base"
+            assert provider == "requested-cli"
             assert path != str(wav_path)
             assert os.path.getsize(path) <= 70 * 1024
             return {
@@ -819,7 +820,9 @@ class TestTranscribeRecording:
 
         with patch("tools.transcription_tools.transcribe_audio", side_effect=fake_transcribe):
             from tools.voice_mode import transcribe_recording
-            result = transcribe_recording(str(wav_path), model="base")
+            result = transcribe_recording(
+                str(wav_path), model="base", provider="requested-cli"
+            )
 
         assert result["success"] is True
         assert result["transcript"] == " ".join(

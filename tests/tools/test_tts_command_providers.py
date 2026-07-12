@@ -450,6 +450,31 @@ class TestTextToSpeechToolWithCommandProvider:
         assert data["voice_compatible"] is False
         assert Path(data["file_path"]).exists()
 
+    def test_per_call_provider_overrides_configured_default(self, tmp_path):
+        cfg = {
+            "provider": "default-cli",
+            "providers": {
+                "default-cli": {
+                    "type": "command",
+                    "command": "exit 1",
+                    "output_format": "mp3",
+                },
+                "requested-cli": {
+                    "type": "command",
+                    "command": _python_copy_command(),
+                    "output_format": "mp3",
+                },
+            },
+        }
+        out = tmp_path / "clip.mp3"
+
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg):
+            result = text_to_speech_tool(
+                text="hi", output_path=str(out), provider="requested-cli"
+            )
+
+        assert json.loads(result)["provider"] == "requested-cli"
+
     def test_voice_compatible_opt_in_toggles_flag(self, tmp_path):
         """voice_compatible=true is reflected in the response when the
         file is already .ogg (no ffmpeg needed)."""
