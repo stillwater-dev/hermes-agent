@@ -2597,7 +2597,9 @@ def check_all_command_guards(command: str, env_type: str,
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    autopilot = _is_autopilot_session()
+    autopilot = _is_autopilot_session() or (
+        approval_mode == "reviewer" and env_var_enabled("HERMES_CRON_SESSION")
+    )
     if autopilot:
         approval_mode = "reviewer"
     if not autopilot and (
@@ -3031,7 +3033,9 @@ def check_execute_code_guard(code: str, env_type: str,
 
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
     approval_mode = _get_approval_mode()
-    autopilot = _is_autopilot_session()
+    autopilot = _is_autopilot_session() or (
+        approval_mode == "reviewer" and env_var_enabled("HERMES_CRON_SESSION")
+    )
     if autopilot:
         approval_mode = "reviewer"
     if not autopilot and (

@@ -1148,6 +1148,17 @@ def test_separate_cron_sessions_create_separate_cards(monkeypatch, worker_env):
     assert first["task_id"] != second["task_id"]
 
 
+def test_cron_create_distinguishes_different_intent(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_library_daily")
+    base = {"title": "Review backlog", "body": "Triage cards"}
+    first = json.loads(kt._handle_create({**base, "assignee": "library"}))
+    second = json.loads(kt._handle_create({**base, "assignee": "reviewer"}))
+
+    assert first["task_id"] != second["task_id"]
+
+
 def test_create_rejects_no_title(worker_env):
     from tools import kanban_tools as kt
     assert json.loads(kt._handle_create({"assignee": "x"})).get("error")

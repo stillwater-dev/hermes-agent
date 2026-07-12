@@ -32,7 +32,7 @@ def _resolve_dispatch_board_allowlist(raw: Any, normalize: Callable[[str], str])
     pieces = list(raw) if isinstance(raw, (list, tuple, set)) else str(raw).split(",")
     pieces = [str(piece).strip() for piece in pieces if str(piece).strip()]
     if not pieces:
-        return None
+        return set() if isinstance(raw, (list, tuple, set)) else None
     if len(pieces) == 1 and pieces[0].lower() in {"0", "false", "no", "off", "none", "disabled"}:
         return set()
     allowed = set()

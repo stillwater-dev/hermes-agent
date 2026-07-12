@@ -109,6 +109,20 @@ def test_headless_dangerous_command_fails_closed(monkeypatch):
     assert "no interactive user" in result["message"]
 
 
+def test_reviewer_mode_automates_cron_terminal_guard(monkeypatch):
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.delenv("HERMES_AUTOPILOT_SESSION", raising=False)
+    monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "reviewer")
+    monkeypatch.setattr(
+        approval_module, "_reviewer_approve", lambda command, description: "approve"
+    )
+
+    result = approval_module.check_all_command_guards("rm -rf ./build", "local")
+
+    assert result["approved"] is True
+    assert result["reviewer_approved"] is True
+
+
 class TestDetectDangerousRm:
     def test_rm_rf_detected(self):
         is_dangerous, key, desc = detect_dangerous_command("rm -rf /home/user")

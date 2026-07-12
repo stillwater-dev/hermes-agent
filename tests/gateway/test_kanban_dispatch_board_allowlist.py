@@ -11,5 +11,6 @@ def _normalize(value):
 def test_dispatch_board_allowlist_distinguishes_all_disabled_and_subset():
     assert _resolve_dispatch_board_allowlist(None, _normalize) is None
     assert _resolve_dispatch_board_allowlist("", _normalize) is None
+    assert _resolve_dispatch_board_allowlist([], _normalize) == set()
     assert _resolve_dispatch_board_allowlist("none", _normalize) == set()
     assert _resolve_dispatch_board_allowlist(["Library", "ops", "bad/name"], _normalize) == {"library", "ops"}

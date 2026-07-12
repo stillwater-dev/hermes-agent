@@ -4817,3 +4817,12 @@ def test_create_task_accepts_explicit_initial_statuses(kanban_home, initial_stat
     with kb.connect() as conn:
         task_id = kb.create_task(conn, title=initial_status, initial_status=initial_status)
         assert kb.get_task(conn, task_id).status == expected
+
+
+def test_explicit_ready_rejects_incomplete_parent(kanban_home):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", initial_status="todo")
+        with pytest.raises(ValueError, match="requires all parents"):
+            kb.create_task(
+                conn, title="child", parents=[parent], initial_status="ready"
+            )

@@ -2593,13 +2593,17 @@ def create_task(
                     if missing:
                         raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                     if task_status == "ready":
-                        # If any parent is not yet done, we're todo.
+                        # Historical "running" requests are dependency-gated.
+                        # Explicit "ready" means dispatchable now, so reject an
+                        # inconsistent request instead of silently changing it.
                         rows = conn.execute(
                             "SELECT status FROM tasks WHERE id IN "
                             "(" + ",".join("?" * len(parents)) + ")",
                             parents,
                         ).fetchall()
                         if any(r["status"] != "done" for r in rows):
+                            if initial_status == "ready":
+                                raise ValueError("ready task requires all parents to be done")
                             task_status = "todo"
 
                 # Project-linked worktree: a fresh worktree dir under the repo

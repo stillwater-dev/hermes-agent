@@ -876,8 +876,14 @@ def _handle_create(args: dict, **kw) -> str:
     board = args.get("board")
     if not idempotency_key and str(session_id or "").startswith("cron_"):
         board_slug = str(board or os.environ.get("HERMES_KANBAN_BOARD") or "default")
+        intent = {
+            "board": board_slug,
+            "created_by": created_by,
+            "session_id": session_id,
+            "args": {key: value for key, value in args.items() if key != "idempotency_key"},
+        }
         digest = hashlib.sha256(
-            f"{board_slug}\n{created_by}\n{session_id}\n{title}\n{body or ''}".encode()
+            json.dumps(intent, sort_keys=True, separators=(",", ":"), default=str).encode()
         ).hexdigest()[:16]
         idempotency_key = f"cron-auto:{board_slug}:{created_by}:{digest}"
     max_runtime_seconds = args.get("max_runtime_seconds")

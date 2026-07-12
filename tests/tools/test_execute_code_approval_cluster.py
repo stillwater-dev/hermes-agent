@@ -283,6 +283,18 @@ def test_autopilot_forces_reviewer_and_fails_closed(monkeypatch):
     assert blocked["reviewer_escalated"] is True
 
 
+def test_reviewer_mode_automates_cron_without_extra_env(monkeypatch):
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.delenv("HERMES_AUTOPILOT_SESSION", raising=False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "reviewer")
+    monkeypatch.setattr(A, "_reviewer_approve", lambda command, description: "approve")
+
+    result = A.check_execute_code_guard("print('safe')", "local")
+
+    assert result["approved"] is True
+    assert result["reviewer_approved"] is True
+
+
 def test_guard_session_yolo_bypasses(gw_session):
     A.enable_session_yolo(gw_session)
     try:

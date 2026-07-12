@@ -1060,8 +1060,6 @@ def create_profile(
         for stale in _CLONE_ALL_STRIP:
             (profile_dir / stale).unlink(missing_ok=True)
         (profile_dir / "memories").mkdir(exist_ok=True)
-        for identity_file in ("MEMORY.md", "USER.md"):
-            (profile_dir / "memories" / identity_file).write_text("", encoding="utf-8")
     else:
         # Bootstrap directory structure
         profile_dir.mkdir(parents=True, exist_ok=True)

@@ -278,8 +278,8 @@ class TestCreateProfile:
         # Content should be copied
         assert (profile_dir / "memories" / "note.md").read_text() == "remember this"
         assert (profile_dir / "config.yaml").read_text() == "model: gpt-4"
-        assert (profile_dir / "memories" / "MEMORY.md").read_text() == ""
-        assert (profile_dir / "memories" / "USER.md").read_text() == ""
+        assert (profile_dir / "memories" / "MEMORY.md").read_text() == "source memory"
+        assert (profile_dir / "memories" / "USER.md").read_text() == "source user"
         # Runtime files should be stripped
         assert not (profile_dir / "gateway.pid").exists()
         assert not (profile_dir / "gateway_state.json").exists()
