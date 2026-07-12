@@ -214,6 +214,9 @@ class TestCreateProfile:
         (default_home / "config.yaml").write_text("model: test")
         (default_home / ".env").write_text("KEY=val")
         (default_home / "SOUL.md").write_text("Be helpful.")
+        (default_home / "memories").mkdir(exist_ok=True)
+        (default_home / "memories" / "MEMORY.md").write_text("source memory")
+        (default_home / "memories" / "USER.md").write_text("source user")
 
         profile_dir = create_profile("coder", clone_config=True, no_alias=True)
 
@@ -222,6 +225,8 @@ class TestCreateProfile:
         assert cloned_config["model"] == "test"
         assert (profile_dir / ".env").read_text().strip() == "KEY=val"
         assert (profile_dir / "SOUL.md").read_text() == "Be helpful."
+        assert not (profile_dir / "memories" / "MEMORY.md").exists()
+        assert not (profile_dir / "memories" / "USER.md").exists()
 
     def test_clone_config_migrates_legacy_config_version(self, profile_env):
         tmp_path = profile_env
@@ -260,6 +265,8 @@ class TestCreateProfile:
         # Populate default with some content
         (default_home / "memories").mkdir(exist_ok=True)
         (default_home / "memories" / "note.md").write_text("remember this")
+        (default_home / "memories" / "MEMORY.md").write_text("source memory")
+        (default_home / "memories" / "USER.md").write_text("source user")
         (default_home / "config.yaml").write_text("model: gpt-4")
         # Runtime files that should be stripped
         (default_home / "gateway.pid").write_text("12345")
@@ -271,6 +278,8 @@ class TestCreateProfile:
         # Content should be copied
         assert (profile_dir / "memories" / "note.md").read_text() == "remember this"
         assert (profile_dir / "config.yaml").read_text() == "model: gpt-4"
+        assert (profile_dir / "memories" / "MEMORY.md").read_text() == ""
+        assert (profile_dir / "memories" / "USER.md").read_text() == ""
         # Runtime files should be stripped
         assert not (profile_dir / "gateway.pid").exists()
         assert not (profile_dir / "gateway_state.json").exists()

@@ -60,14 +60,6 @@ _CLONE_CONFIG_FILES = [
     "SOUL.md",
 ]
 
-# Subdirectory files copied during --clone (path relative to profile root).
-# Memory files are part of the agent's curated identity — just as important
-# as SOUL.md for continuity when cloning a profile.
-_CLONE_SUBDIR_FILES = [
-    "memories/MEMORY.md",
-    "memories/USER.md",
-]
-
 # Runtime files stripped after --clone-all (shouldn't carry over).
 # Kept as a post-copy step rather than in the ignore filter because they
 # are created dynamically during normal use and may be absent at copy time.
@@ -1009,7 +1001,7 @@ def create_profile(
         If True, do a full copytree of the source (all state).
     clone_config:
         If True, copy config files (config.yaml, .env, SOUL.md), installed
-        skills, and selected profile identity files from the source profile.
+        skills from the source profile.
     no_alias:
         If True, skip wrapper script creation.
     no_skills:
@@ -1067,6 +1059,9 @@ def create_profile(
         # Strip runtime files
         for stale in _CLONE_ALL_STRIP:
             (profile_dir / stale).unlink(missing_ok=True)
+        (profile_dir / "memories").mkdir(exist_ok=True)
+        for identity_file in ("MEMORY.md", "USER.md"):
+            (profile_dir / "memories" / identity_file).write_text("", encoding="utf-8")
     else:
         # Bootstrap directory structure
         profile_dir.mkdir(parents=True, exist_ok=True)
@@ -1097,14 +1092,6 @@ def create_profile(
             source_skills = source_dir / "skills"
             if source_skills.is_dir():
                 shutil.copytree(source_skills, profile_dir / "skills", symlinks=True, dirs_exist_ok=True)
-
-            # Clone memory and other subdirectory files
-            for relpath in _CLONE_SUBDIR_FILES:
-                src = source_dir / relpath
-                if src.exists():
-                    dst = profile_dir / relpath
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
 
     # Seed an empty .env so the profile has its own credentials file from
     # day one. Without it, profile-scoped env writes (dashboard Channels /
