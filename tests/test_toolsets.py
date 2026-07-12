@@ -55,6 +55,14 @@ class TestResolveToolset:
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_extract"}
 
+    def test_kanban_manager_lite_has_no_lifecycle_authority(self):
+        tools = set(resolve_toolset("kanban_manager_lite"))
+        assert tools == {
+            "kanban_show", "kanban_list", "kanban_comment",
+            "kanban_create", "kanban_link",
+        }
+        assert tools.isdisjoint({"kanban_complete", "kanban_block", "kanban_unblock"})
+
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")
         assert "terminal" in tools

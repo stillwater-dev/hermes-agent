@@ -2056,6 +2056,13 @@ def test_board_param_in_all_schemas():
         )
 
 
+def test_create_schema_advertises_all_explicit_initial_states():
+    from tools import kanban_tools as kt
+
+    states = kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]["initial_status"]["enum"]
+    assert states == ["running", "ready", "todo", "triage", "blocked"]
+
+
 # ---------------------------------------------------------------------------
 # kanban_create auto-subscribe behaviour
 #
