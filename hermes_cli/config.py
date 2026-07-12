@@ -1619,6 +1619,14 @@ DEFAULT_CONFIG = {
             "timeout": 30,
             "extra_body": {},
         },
+        "approval_reviewer": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 45,
+            "extra_body": {},
+        },
         "mcp": {
             "provider": "auto",
             "model": "",
@@ -2522,7 +2530,8 @@ DEFAULT_CONFIG = {
         "allowed_rooms": "",           # If set, bot ONLY responds in these room IDs (whitelist)
     },
 
-    # Approval mode for dangerous commands:
+    # Approval mode for dangerous commands. Reviewer mode uses the separately
+    # configurable auxiliary.approval_reviewer model/provider slot.
     #   manual — always prompt the user (default)
     #   smart  — use auxiliary LLM to auto-approve low-risk commands, prompt for high-risk
     #   off    — skip all approval prompts (equivalent to --yolo)

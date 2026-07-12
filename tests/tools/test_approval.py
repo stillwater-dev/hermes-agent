@@ -13,6 +13,7 @@ from hermes_constants import get_hermes_home
 from tools.approval import (
     _get_approval_mode,
     _normalize_approval_mode,
+    _reviewer_approve,
     _smart_approve,
     approve_session,
     detect_dangerous_command,
@@ -35,6 +36,7 @@ class TestApprovalModeParsing:
     def test_valid_modes_pass_through(self):
         assert _normalize_approval_mode("manual") == "manual"
         assert _normalize_approval_mode("smart") == "smart"
+        assert _normalize_approval_mode("reviewer") == "reviewer"
         assert _normalize_approval_mode("off") == "off"
 
     def test_valid_mode_is_case_insensitive_and_trimmed(self):
@@ -67,6 +69,44 @@ class TestSmartApproval:
         assert mock_call.call_args.kwargs["task"] == "approval"
         assert mock_call.call_args.kwargs["temperature"] == 0
         assert mock_call.call_args.kwargs["max_tokens"] == 16
+
+    def test_reviewer_uses_independent_auxiliary_task(self):
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="APPROVE"))]
+        )
+        with mock_patch("agent.auxiliary_client.call_llm", return_value=response) as call:
+            assert _reviewer_approve("git status", "shell command") == "approve"
+
+        assert call.call_args.kwargs["task"] == "approval_reviewer"
+
+
+def test_autopilot_terminal_forces_reviewer_even_when_mode_off(monkeypatch):
+    monkeypatch.setenv("HERMES_AUTOPILOT_SESSION", "1")
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "off")
+    monkeypatch.setattr(
+        approval_module, "_reviewer_approve", lambda command, description: "approve"
+    )
+
+    result = approval_module.check_all_command_guards("rm -rf ./build", "local")
+
+    assert result["approved"] is True
+    assert result["reviewer_approved"] is True
+
+
+def test_headless_dangerous_command_fails_closed(monkeypatch):
+    monkeypatch.delenv("HERMES_AUTOPILOT_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+    monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+
+    result = approval_module.check_all_command_guards("rm -rf ./build", "local")
+
+    assert result["approved"] is False
+    assert "no interactive user" in result["message"]
 
 
 class TestDetectDangerousRm:

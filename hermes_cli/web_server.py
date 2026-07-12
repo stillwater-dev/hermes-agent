@@ -671,7 +671,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "approvals.mode": {
         "type": "select",
         "description": "Dangerous command approval mode",
-        "options": ["ask", "yolo", "deny"],
+        "options": ["manual", "smart", "reviewer", "off"],
     },
     "context.engine": {
         "type": "select",
@@ -5390,6 +5390,7 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
     "compression",
     "skills_hub",
     "approval",
+    "approval_reviewer",
     "mcp",
     "title_generation",
     "triage_specifier",

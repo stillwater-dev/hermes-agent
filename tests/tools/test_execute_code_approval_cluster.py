@@ -266,6 +266,23 @@ def test_guard_smart_mode(gw_session, monkeypatch):
     assert res["approved"] is True
 
 
+def test_autopilot_forces_reviewer_and_fails_closed(monkeypatch):
+    monkeypatch.setenv("HERMES_AUTOPILOT_SESSION", "1")
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "off")
+
+    monkeypatch.setattr(A, "_reviewer_approve", lambda command, description: "approve")
+    approved = A.check_execute_code_guard("print('safe')", "local")
+    assert approved["approved"] is True
+    assert approved["reviewer_approved"] is True
+
+    monkeypatch.setattr(A, "_reviewer_approve", lambda command, description: "escalate")
+    blocked = A.check_execute_code_guard("import os", "local")
+    assert blocked["approved"] is False
+    assert blocked["reviewer_escalated"] is True
+
+
 def test_guard_session_yolo_bypasses(gw_session):
     A.enable_session_yolo(gw_session)
     try:

@@ -1792,9 +1792,9 @@ def _normalize_approval_mode(mode) -> str:
 
     Unknown string values (e.g. 'auto') are rejected with a warning rather than
     being silently accepted and falling through every mode check downstream.
-    Always returns one of 'manual', 'smart', or 'off'.
+    Always returns one of 'manual', 'smart', 'reviewer', or 'off'.
     """
-    _VALID_MODES = ("manual", "smart", "off")
+    _VALID_MODES = ("manual", "smart", "reviewer", "off")
     if isinstance(mode, bool):
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
@@ -1918,7 +1918,7 @@ def _strip_line_comment(line: str) -> str:
     return line
 
 
-def _smart_approve(command: str, description: str) -> str:
+def _llm_approve(command: str, description: str, *, task: str) -> str:
     """Use the auxiliary LLM to assess risk and decide approval.
 
     Returns 'approve' if the LLM determines the command is safe,
@@ -1973,7 +1973,7 @@ def _smart_approve(command: str, description: str) -> str:
         )
 
         response = call_llm(
-            task="approval",
+            task=task,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1994,6 +1994,18 @@ def _smart_approve(command: str, description: str) -> str:
     except Exception as e:
         logger.debug("Smart approvals: LLM call failed (%s), escalating", e)
         return "escalate"
+
+
+def _smart_approve(command: str, description: str) -> str:
+    return _llm_approve(command, description, task="approval")
+
+
+def _reviewer_approve(command: str, description: str) -> str:
+    return _llm_approve(command, description, task="approval_reviewer")
+
+
+def _is_autopilot_session() -> bool:
+    return env_var_enabled("HERMES_AUTOPILOT_SESSION")
 
 
 def _run_approval_gate(
@@ -2585,7 +2597,14 @@ def check_all_command_guards(command: str, env_type: str,
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    autopilot = _is_autopilot_session()
+    if autopilot:
+        approval_mode = "reviewer"
+    if not autopilot and (
+        _YOLO_MODE_FROZEN
+        or is_current_session_yolo_enabled()
+        or approval_mode == "off"
+    ):
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):
@@ -2597,9 +2616,11 @@ def check_all_command_guards(command: str, env_type: str,
 
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
     # flows, we do not block on approvals and we skip external guard work.
-    if not is_cli and not is_gateway and not is_ask:
+    if not autopilot and not is_cli and not is_gateway and not is_ask:
         # Cron sessions: respect cron_mode config
         if env_var_enabled("HERMES_CRON_SESSION"):
+            if _get_cron_approval_mode() != "deny":
+                return {"approved": True, "message": None}
             if _get_cron_approval_mode() == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
@@ -2661,6 +2682,15 @@ def check_all_command_guards(command: str, env_type: str,
                             ),
                         }
                     # else: tirith_fail_open is True — allow as before
+        is_dangerous, _pattern_key, description = detect_dangerous_command(command)
+        if is_dangerous:
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED: dangerous command requires approval ({description}) "
+                    "but no interactive user or gateway is present."
+                ),
+            }
         return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
@@ -2741,9 +2771,13 @@ def check_all_command_guards(command: str, env_type: str,
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
-    if approval_mode == "smart":
+    if approval_mode in {"smart", "reviewer"}:
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
-        verdict = _smart_approve(command, combined_desc_for_llm)
+        verdict = (
+            _reviewer_approve(command, combined_desc_for_llm)
+            if approval_mode == "reviewer"
+            else _smart_approve(command, combined_desc_for_llm)
+        )
         if verdict == "approve":
             # Auto-approve and grant session-level approval for these patterns
             for key, _, _ in warnings:
@@ -2751,7 +2785,7 @@ def check_all_command_guards(command: str, env_type: str,
             logger.debug("Smart approval: auto-approved '%s' (%s)",
                          command[:60], combined_desc_for_llm)
             return {"approved": True, "message": None,
-                    "smart_approved": True,
+                    f"{approval_mode}_approved": True,
                     "description": combined_desc_for_llm}
         elif verdict == "deny":
             combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
@@ -2759,9 +2793,19 @@ def check_all_command_guards(command: str, env_type: str,
                 "approved": False,
                 "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
-                "smart_denied": True,
+                f"{approval_mode}_denied": True,
             }
         # verdict == "escalate" → fall through to manual prompt
+
+    if approval_mode == "reviewer" and autopilot:
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: the autonomous approval reviewer could not "
+                "confidently approve this command."
+            ),
+            "reviewer_escalated": True,
+        }
 
     # --- Phase 3: Approval ---
 
@@ -2987,14 +3031,22 @@ def check_execute_code_guard(code: str, env_type: str,
 
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    autopilot = _is_autopilot_session()
+    if autopilot:
+        approval_mode = "reviewer"
+    if not autopilot and (
+        _YOLO_MODE_FROZEN
+        or is_current_session_yolo_enabled()
+        or approval_mode == "off"
+    ):
         return {"approved": True, "message": None}
 
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
-    # Cron: no user is present to approve arbitrary code.
-    if env_var_enabled("HERMES_CRON_SESSION"):
+    # Cron: no user is present to approve arbitrary code unless Autopilot's
+    # independent reviewer is active.
+    if not autopilot and env_var_enabled("HERMES_CRON_SESSION"):
         if _get_cron_approval_mode() == "deny":
             return {
                 "approved": False,
@@ -3018,7 +3070,7 @@ def check_execute_code_guard(code: str, env_type: str,
     #     (context now propagates into the RPC thread, #33057); a whole-script
     #     prompt would fire on every execute_code call.
     #   * Local non-interactive non-gateway: documented limitation above.
-    if not is_gateway and not is_ask:
+    if not autopilot and not is_gateway and not is_ask:
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
@@ -3046,26 +3098,44 @@ def check_execute_code_guard(code: str, env_type: str,
     # Smart mode: ask the aux LLM about the whole script. An APPROVE here only
     # suppresses the redundant whole-script prompt; the per-call terminal()
     # guards (restored by context propagation) still run independently.
-    if approval_mode == "smart":
-        verdict = _smart_approve(command, description)
+    if approval_mode in {"smart", "reviewer"}:
+        verdict = (
+            _reviewer_approve(command, description)
+            if approval_mode == "reviewer"
+            else _smart_approve(command, description)
+        )
         if verdict == "approve":
             logger.debug("Smart approval: auto-approved execute_code for session %s",
                          session_key)
             return {"approved": True, "message": None,
-                    "smart_approved": True, "description": description}
+                    f"{approval_mode}_approved": True, "description": description}
         if verdict == "deny":
             return {
                 "approved": False,
                 "message": ("BLOCKED by smart approval: execute_code script "
                             "execution was assessed as genuinely dangerous. "
                             "Do NOT retry."),
-                "smart_denied": True,
+                f"{approval_mode}_denied": True,
                 "pattern_key": pattern_key,
                 "description": description,
                 "outcome": "denied",
                 "user_consent": False,
             }
         # verdict == "escalate" → fall through to manual approval
+
+    if approval_mode == "reviewer" and autopilot:
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: the autonomous approval reviewer could not "
+                "confidently approve execute_code."
+            ),
+            "reviewer_escalated": True,
+            "pattern_key": pattern_key,
+            "description": description,
+            "outcome": "escalated",
+            "user_consent": False,
+        }
 
     notify_cb = None
     with _lock:
