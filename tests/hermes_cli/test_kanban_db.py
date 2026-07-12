@@ -4790,3 +4790,14 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "expected"),
+    [("running", "ready"), ("ready", "ready"), ("todo", "todo"),
+     ("triage", "triage"), ("blocked", "blocked")],
+)
+def test_create_task_accepts_explicit_initial_statuses(kanban_home, initial_status, expected):
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title=initial_status, initial_status=initial_status)
+        assert kb.get_task(conn, task_id).status == expected
