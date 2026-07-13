@@ -1233,7 +1233,18 @@ def _finalize_single_query(cli) -> None:
         _notify_single_query_session_finalize(cli)
         _run_cleanup(notify_session_finalize=False)
     finally:
-        cli._release_active_session()
+        try:
+            agent = getattr(cli, "agent", None)
+            session_db = getattr(cli, "_session_db", None)
+            session_id = getattr(agent, "session_id", None) or getattr(
+                cli, "session_id", None
+            )
+            if session_db is not None and session_id:
+                session_db.end_session(session_id, "cli_close")
+        except Exception as exc:
+            logger.debug("Could not close one-shot session in DB: %s", exc)
+        finally:
+            cli._release_active_session()
 
 
 def _reset_terminal_input_modes_on_exit() -> None:

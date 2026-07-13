@@ -13,7 +13,13 @@ def reset_single_query_finalize_state(monkeypatch):
 
 def test_finalize_single_query_runs_cleanup_without_reemitting_finalize_before_release(monkeypatch):
     calls = []
-    fake_cli = SimpleNamespace(_release_active_session=lambda: calls.append(("release", {})))
+    fake_cli = SimpleNamespace(
+        agent=SimpleNamespace(session_id="agent-session"),
+        _session_db=SimpleNamespace(
+            end_session=lambda *args: calls.append(("end_session", args))
+        ),
+        _release_active_session=lambda: calls.append(("release", {})),
+    )
 
     def cleanup(**kwargs):
         calls.append(("cleanup", kwargs))
@@ -30,6 +36,7 @@ def test_finalize_single_query_runs_cleanup_without_reemitting_finalize_before_r
     assert calls == [
         ("finalize", {}),
         ("cleanup", {"notify_session_finalize": False}),
+        ("end_session", ("agent-session", "cli_close")),
         ("release", {}),
     ]
 
